@@ -237,6 +237,40 @@ textarea { resize: vertical; min-height: 60px; }
   box-shadow: var(--shadow);
   cursor: pointer;
   transition: transform 0.1s, box-shadow 0.1s;
+  position: relative;
+}
+
+.wine-delete-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--border);
+  color: var(--danger);
+  font-size: 0.95rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
+  z-index: 1;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.wine-delete-btn:hover {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+.wine-delete-btn:active { transform: scale(0.92); }
+.wine-delete-btn:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .wine-card:hover {

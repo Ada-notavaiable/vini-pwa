@@ -114,6 +114,36 @@ async function ensurePhotoDir() {
   }
 }
 
+// Parser CSV minimo: separatore `;`, supporta quoting ("..." con "" per il carattere "),
+// gestisce BOM UTF-8 iniziale e \r\n / \n. Restituisce array di righe (array di stringhe).
+function parseCsv(text) {
+  if (!text) return [];
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // BOM
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else { inQuotes = false; }
+      } else {
+        field += c;
+      }
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ';') { row.push(field); field = ''; }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else if (c === '\r') { /* ignore */ }
+      else field += c;
+    }
+  }
+  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
+  return rows;
+}
+
 async function processPhoto(inputPath, originalName) {
   // jimp 0.22 legge i pixel "così come sono" senza applicare EXIF Orientation,
   // quindi se una foto iPhone è registrata in landscape ma va mostrata vertical
@@ -452,6 +482,92 @@ app.get('/api/stats', (req, res) => {
     by_month: byMonth,
     recent,
   });
+});
+
+// Import CSV: multipart upload (campo 'csv'), separatore ';', header atteso:
+//   id;name;store;rating;note;photo;created_at
+// Shop non trovati → store_id NULL (non creiamo negozi automaticamente).
+// Foto in CSV vengono IGNORATE (non associabili a file reali via solo CSV).
+app.post('/api/wines/import-csv', upload.single('csv'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'file CSV mancante' });
+  let raw;
+  try {
+    raw = fs.readFileSync(req.file.path, 'utf8');
+  } catch (e) {
+    return res.status(500).json({ error: 'lettura file fallita: ' + (e.message || e) });
+  }
+  try {
+    fs.unlinkSync(req.file.path);
+  } catch (_) { /* ignore */ }
+
+  const rows = parseCsv(raw).filter(r => r.some(c => (c || '').trim() !== ''));
+  if (!rows.length) return res.status(400).json({ error: 'CSV vuoto' });
+
+  // Header: lowercase + trim, mappa per nome indicizzata per posizione
+  const header = (rows[0] || []).map(h => (h || '').toLowerCase().trim());
+  const idx = {
+    name: header.indexOf('name'),
+    store: header.indexOf('store'),
+    rating: header.indexOf('rating'),
+    note: header.indexOf('note'),
+    photo: header.indexOf('photo'),
+    created_at: header.indexOf('created_at'),
+  };
+  if (idx.name < 0) return res.status(400).json({ error: 'colonna "name" mancante nell\'header' });
+  if (idx.rating < 0) return res.status(400).json({ error: 'colonna "rating" mancante nell\'header' });
+
+  // Mappa negozi: nome lowercase → id (per riconciliazione case-insensitive)
+  const storesByName = new Map();
+  for (const s of getAll('SELECT id, name FROM stores')) {
+    storesByName.set(String(s.name).toLowerCase().trim(), s.id);
+  }
+
+  const errors = [];
+  let imported = 0, skipped = 0;
+
+  db.run('BEGIN');
+  try {
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i] || [];
+      const lineNo = i + 1;
+      const name = (row[idx.name] || '').trim();
+      const rating = parseInt((row[idx.rating] || '').trim(), 10);
+      if (!name) { errors.push(`riga ${lineNo}: nome vuoto`); skipped++; continue; }
+      if (!Number.isInteger(rating) || rating < 1 || rating > 10) {
+        errors.push(`riga ${lineNo}: rating non valido (serve 1-10)`);
+        skipped++;
+        continue;
+      }
+      let storeId = null;
+      if (idx.store >= 0 && row[idx.store]) {
+        const key = String(row[idx.store]).trim().toLowerCase();
+        if (storesByName.has(key)) storeId = storesByName.get(key);
+      }
+      const note = (idx.note >= 0 && row[idx.note]) ? String(row[idx.note]) : null;
+      const createdAtSrc = (idx.created_at >= 0 && row[idx.created_at]) ? String(row[idx.created_at]).trim() : '';
+      const useCreatedAt = /^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2})?$/.test(createdAtSrc);
+
+      try {
+        if (useCreatedAt) {
+          runSql(`INSERT INTO wines (name, store_id, rating, note, created_at) VALUES (?, ?, ?, ?, ?)`,
+                 [name, storeId, rating, note, createdAtSrc]);
+        } else {
+          runSql(`INSERT INTO wines (name, store_id, rating, note) VALUES (?, ?, ?, ?)`,
+                 [name, storeId, rating, note]);
+        }
+        imported++;
+      } catch (e) {
+        errors.push(`riga ${lineNo}: ${e.message || e}`);
+        skipped++;
+      }
+    }
+    db.run('COMMIT');
+  } catch (e) {
+    try { db.run('ROLLBACK'); } catch (_) {}
+    return res.status(500).json({ error: 'import fallito a metà: ' + (e.message || e) });
+  }
+  saveDB();
+  res.json({ imported, skipped, errors: errors.slice(0, 25), total_errors: errors.length });
 });
 
 // ---------- API: export CSV ----------

@@ -52,6 +52,32 @@
   let pendingPhotoUrl = null;      // ObjectURL associato al File (per revocarlo)
   let deferredInstallPrompt = null;
 
+  // ---------- confirm modal (riusato da elimina vino ed eventuali altri) ----------
+  let pendingConfirmCallback = null;
+  let lastConfirmTrigger = null;
+
+  function openConfirmModal(title, message, onOk, trigger) {
+    $('confirm-modal-title').textContent = title;
+    $('confirm-modal-message').textContent = message;
+    pendingConfirmCallback = onOk;
+    lastConfirmTrigger = trigger || null;
+    $('confirm-modal').classList.add('open');
+    $('confirm-modal').setAttribute('aria-hidden', 'false');
+    const cancel = $('confirm-modal-cancel');
+    try { cancel.focus({ preventScroll: true }); } catch (_) { cancel.focus(); }
+  }
+
+  function closeConfirmModal() {
+    const wasOpen = $('confirm-modal').classList.contains('open');
+    $('confirm-modal').classList.remove('open');
+    $('confirm-modal').setAttribute('aria-hidden', 'true');
+    if (wasOpen && lastConfirmTrigger && typeof lastConfirmTrigger.focus === 'function') {
+      try { lastConfirmTrigger.focus({ preventScroll: true }); } catch (_) { lastConfirmTrigger.focus(); }
+    }
+    pendingConfirmCallback = null;
+    lastConfirmTrigger = null;
+  }
+
   // ---------- online status ----------
 
   function setOnline() {
@@ -122,6 +148,7 @@
         : '🍷';
 
       card.innerHTML = `
+        <button type="button" class="wine-delete-btn" aria-label="Elimina vino" title="Elimina">🗑</button>
         <div class="thumb">${thumbH}</div>
         <div class="meta">
           <div class="name">${escapeHtml(w.name)}</div>
@@ -134,6 +161,30 @@
         </div>
       `;
       card.addEventListener('click', () => beginEdit(w));
+      const delBtn = card.querySelector('.wine-delete-btn');
+      if (delBtn) {
+        // Conferma prima di cancellare; il bottone in card on evita di aprire il form di modifica.
+        delBtn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          const wineName = (w.name && String(w.name)) || 'questo vino';
+          openConfirmModal(
+            'Elimina vino',
+            `Vuoi eliminare “${wineName}”? L’operazione è irreversibile.`,
+            async () => {
+              try {
+                await api('/api/wines/' + w.id, { method: 'DELETE' });
+                toast('Vino eliminato', 'success');
+                if (editingId === w.id) resetForm();
+                loadWines();
+              } catch (e) {
+                toast('Errore: ' + e.message, 'error');
+              }
+            },
+            delBtn
+          );
+        });
+      }
       wrap.appendChild(card);
     }
   }
@@ -281,6 +332,49 @@
   // ---------- buttons ----------
 
   $('refresh-btn').addEventListener('click', () => { loadWines(); toast('Aggiornato'); });
+
+  // ---------- import CSV ----------
+  $('import-csv-btn').addEventListener('click', () => $('csv-input').click());
+  $('csv-input').addEventListener('change', () => {
+    const f = $('csv-input').files && $('csv-input').files[0];
+    $('csv-input').value = ''; // permette di re-importare lo stesso file
+    if (!f) return;
+    const fd = new FormData();
+    fd.append('csv', f, f.name);
+    toast('Import in corso…');
+    fetch('/api/wines/import-csv', { method: 'POST', body: fd })
+      .then(async (r) => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
+        const parts = [`Importati ${body.imported || 0}`];
+        if (body.skipped) parts.push(`${body.skipped} saltati`);
+        if (body.total_errors) parts.push(`${body.total_errors} errori`);
+        toast(parts.join(' · '), body.total_errors ? 'error' : 'success');
+        if (Array.isArray(body.errors) && body.errors.length) {
+          console.warn('CSV import errors:', body.errors);
+        }
+        loadWines();
+      })
+      .catch((e) => toast('Errore import: ' + e.message, 'error'));
+  });
+
+  // ---------- wiring modal di conferma (elimina vino) ----------
+  $('confirm-modal-cancel').addEventListener('click', closeConfirmModal);
+  $('confirm-modal-ok').addEventListener('click', async () => {
+    const cb = pendingConfirmCallback;
+    closeConfirmModal();
+    if (typeof cb === 'function') {
+      try { await cb(); } catch (e) { console.error(e); }
+    }
+  });
+  $('confirm-modal').addEventListener('click', (ev) => {
+    if (ev.target === $('confirm-modal')) closeConfirmModal();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && $('confirm-modal').classList.contains('open')) {
+      closeConfirmModal();
+    }
+  });
 
   $('update-app-btn').addEventListener('click', async () => {
     if (!('serviceWorker' in navigator)) { toast('Service worker non supportato', 'error'); return; }

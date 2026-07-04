@@ -99,6 +99,8 @@
 
     <div class="btn-group" style="margin-top:16px;">
       <a href="/api/export/wines.csv" class="btn btn-secondary">⬇️ Esporta CSV</a>
+      <input type="file" id="csv-input" accept=".csv,text/csv" hidden />
+      <button type="button" class="btn btn-secondary" id="import-csv-btn">📥 Importa CSV</button>
       <button type="button" class="btn btn-secondary" id="refresh-btn">🔄 Aggiorna</button>
       <button type="button" class="btn btn-secondary" id="update-app-btn" title="Scarica l'ultima versione dell'app">🆕 Aggiorna app</button>
     </div>
@@ -110,6 +112,18 @@
   </footer>
 
   <div id="toast-container"></div>
+
+  <!-- Modal: conferma eliminazione vino -->
+  <div class="modal-backdrop" id="confirm-modal" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+      <h2 id="confirm-modal-title">Elimina vino</h2>
+      <p id="confirm-modal-message" style="margin:0 0 12px 0;color:var(--text-soft);">Sei sicuro?</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="confirm-modal-cancel">Annulla</button>
+        <button type="button" class="btn btn-danger" id="confirm-modal-ok">Elimina</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>
