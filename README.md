@@ -60,7 +60,7 @@ git push -u origin main
    - **Compose path**: `docker-compose.yml`
 4. Spunta **Automatic updates** se vuoi che Portainer ricontrolli la repo automaticamente (intervallo di default 5 minuti, configurabile per-stack).
 5. Nella sezione **Environment variables** puoi sovrascrivere:
-   - `HOST_PORT` — porta esposta sull'Orange Pi (default `3000`)
+   - `HOST_PORT` — porta esposta sull'Orange Pi (default `3100`, perché 3000 è già usata dal progetto `orto`)
    - `TZ` — fuso orario, es. `Europe/Rome`
    - `NODE_ENV` — `production` di default
 6. Clicca **Deploy the stack**.
@@ -74,7 +74,7 @@ Portainer clonerà la repo, builda l'immagine e avvia il container.
 Dal browser del cellulare o del PC in LAN:
 
 ```
-http://<ip-orange-pi>:3000
+http://<ip-orange-pi>:3100
 ```
 
 ### 4. Aggiornare l'app
@@ -100,7 +100,7 @@ Tutte opzionali; i default funzionano su un'installazione standard.
 
 | Variabile | Default | Descrizione |
 | --- | --- | --- |
-| `HOST_PORT` | `3000` | Porta TCP esposta sull'host (nel compose). |
+| `HOST_PORT` | `3100` | Porta TCP esposta sull'host (nel compose). |
 | `TZ` | `Europe/Rome` | Fuso orario del container. |
 | `NODE_ENV` | `production` | Modalità Node. |
 

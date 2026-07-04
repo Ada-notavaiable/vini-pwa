@@ -2,7 +2,7 @@
 # Funziona anche con `docker compose up -d --build`.
 #
 # Variabili d'ambiente (impostabili nella UI di Portainer allo stack):
-#   HOST_PORT  - porta TCP esposta sull'host (default 3000)
+#   HOST_PORT  - porta TCP esposta sull'host (default 3100)
 #   TZ         - fuso orario del container (es. Europe/Rome)
 #   NODE_ENV   - production | development
 
@@ -14,7 +14,7 @@ services:
     image: vinipwa:latest
     restart: unless-stopped
     ports:
-      - "${HOST_PORT:-3000}:3000"
+      - "${HOST_PORT:-3100}:3000"
     volumes:
       - vinidata:/data
     # Limiti pensati per Orange Pi Zero / piccole board ARM.
