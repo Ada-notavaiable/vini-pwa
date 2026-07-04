@@ -1,0 +1,41 @@
+# Node / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dati e foto: vivono sul volume Docker (vinidata), non vanno committati
+vini.db
+vini.db-journal
+*.sqlite
+*.sqlite-journal
+photos/
+public/photos/
+
+# Log e file di test generati dal server
+*.log
+
+# Variabili d'ambiente / segreti
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Cartelle di build non Docker
+dist/
+build/
+
+# File locali orto-style (rar, dump, ecc.)
+*.rar
+*.zip
+*.tar
+*.gz
+nul

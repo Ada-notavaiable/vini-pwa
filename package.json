@@ -1,0 +1,17 @@
+{
+  "name": "vinipwa",
+  "version": "1.0.0",
+  "description": "PWA per registrare i vini bevuti, con foto ridimensionate, lista negozi, rating e note. Pensata per Orange Pi.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --max-old-space-size=128 server.js",
+    "dev": "node --max-old-space-size=256 server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "jimp": "^0.22.12",
+    "multer": "^1.4.5-lts.1",
+    "sql.js": "^1.10.3"
+  }
+}

@@ -1,0 +1,38 @@
+# Tiene il build context snello: copia solo ciò che serve a `npm install` + COPY.
+node_modules
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dati runtime (non devono entrare nell'immagine)
+vini.db
+vini.db-journal
+photos/
+public/photos/
+
+# Log
+*.log
+server.log
+server_test.log
+
+# Repo / secrets
+.git
+.gitignore
+.dockerignore
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Documentazione extra non necessaria al runtime
+*.rar
+*.zip
+*.tar
+*.gz
+README.md

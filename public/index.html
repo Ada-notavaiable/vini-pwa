@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#6a1b3d" />
+  <title>Vini — PWA</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="/icon-192.png" type="image/png" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+</head>
+<body>
+  <header class="app-header">
+    <h1><span class="glass">🍷</span> Vini <span id="status-pill" class="status-pill offline">…</span></h1>
+    <nav class="tabs" id="nav-tabs">
+      <a class="tab active" href="/" data-tab="vini">Vini</a>
+      <a class="tab" href="/negozi.html" data-tab="negozi">Negozi</a>
+      <a class="tab" href="/stats.html" data-tab="stats">Stats</a>
+    </nav>
+  </header>
+
+  <main class="container">
+
+    <section class="form-card" id="form-card">
+      <h2 id="form-title">Aggiungi vino</h2>
+      <form id="wine-form" autocomplete="off">
+        <input type="hidden" id="wine-id" />
+
+        <div class="form-row">
+          <label for="wine-name">Nome vino *</label>
+          <input id="wine-name" type="text" required placeholder="Es. Barolo Riserva 2018" />
+        </div>
+
+        <div class="form-row">
+          <label for="wine-store">Negozio</label>
+          <select id="wine-store">
+            <option value="">— non specificato —</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label>Voto (1–10) *</label>
+          <div class="stars" id="stars-input" role="radiogroup" aria-label="Voto">
+            <!-- 10 → 1 -->
+            <input type="radio" id="r10" name="rating" value="10" /><label for="r10" title="10">★</label>
+            <input type="radio" id="r9"  name="rating" value="9"  /><label for="r9" title="9">★</label>
+            <input type="radio" id="r8"  name="rating" value="8"  /><label for="r8" title="8">★</label>
+            <input type="radio" id="r7"  name="rating" value="7"  /><label for="r7" title="7">★</label>
+            <input type="radio" id="r6"  name="rating" value="6"  /><label for="r6" title="6">★</label>
+            <input type="radio" id="r5"  name="rating" value="5"  /><label for="r5" title="5">★</label>
+            <input type="radio" id="r4"  name="rating" value="4"  /><label for="r4" title="4">★</label>
+            <input type="radio" id="r3"  name="rating" value="3"  /><label for="r3" title="3">★</label>
+            <input type="radio" id="r2"  name="rating" value="2"  /><label for="r2" title="2">★</label>
+            <input type="radio" id="r1"  name="rating" value="1"  /><label for="r1" title="1">★</label>
+          </div>
+          <div class="help-text" id="rating-help">Tocca una stella per votare (10 = eccezionale).</div>
+        </div>
+
+        <div class="form-row">
+          <label for="wine-note">Nota</label>
+          <textarea id="wine-note" rows="3" placeholder="Profumo, sapore, occasione…"></textarea>
+        </div>
+
+        <div class="form-row">
+          <label for="wine-photo">Foto (opzionale)</label>
+          <input id="wine-photo" type="file" accept="image/*" />
+          <div class="help-text">Verrà ridimensionata automaticamente per risparmiare spazio.</div>
+          <div class="photo-preview" id="photo-preview" hidden>
+            <img id="photo-preview-img" src="" alt="anteprima" />
+            <button type="button" class="btn btn-danger" id="remove-photo-btn">Rimuovi foto</button>
+          </div>
+        </div>
+
+        <div class="btn-group">
+          <button type="submit" class="btn btn-primary" id="save-btn">Salva</button>
+          <button type="button" class="btn btn-secondary" id="cancel-edit-btn" hidden>Annulla</button>
+        </div>
+      </form>
+    </section>
+
+    <div class="section-title">📖 I tuoi vini (<span id="count-wines">0</span>)</div>
+
+    <div id="wines-list" class="list"></div>
+    <div id="empty-state" class="empty-state" hidden>
+      <span class="icon">🍇</span>
+      Nessun vino registrato.<br />Aggiungine uno sopra per iniziare!
+    </div>
+
+    <div class="btn-group" style="margin-top:16px;">
+      <a href="/api/export/wines.csv" class="btn btn-secondary">⬇️ Esporta CSV</a>
+      <button type="button" class="btn btn-secondary" id="refresh-btn">🔄 Aggiorna</button>
+      <button type="button" class="btn btn-secondary" id="update-app-btn" title="Scarica l'ultima versione dell'app">🆕 Aggiorna app</button>
+    </div>
+
+  </main>
+
+  <footer class="app-footer">
+    Vini PWA · v1 · <a href="/README" target="_blank">info</a>
+  </footer>
+
+  <div id="toast-container"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

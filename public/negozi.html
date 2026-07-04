@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#6a1b3d" />
+  <title>Negozi — Vini PWA</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="/icon-192.png" type="image/png" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+</head>
+<body>
+  <header class="app-header">
+    <h1><span class="glass">🏪</span> Negozi</h1>
+    <nav class="tabs">
+      <a class="tab" href="/" data-tab="vini">Vini</a>
+      <a class="tab active" href="/negozi.html" data-tab="negozi">Negozi</a>
+      <a class="tab" href="/stats.html" data-tab="stats">Stats</a>
+    </nav>
+  </header>
+
+  <main class="container">
+
+    <section class="form-card">
+      <h2>Aggiungi negozio</h2>
+      <form id="store-form" autocomplete="off">
+        <div class="form-row">
+          <label for="store-name">Nome *</label>
+          <input id="store-name" type="text" required placeholder="Es. Enoteca del Borgo" />
+        </div>
+        <div class="btn-group">
+          <button type="submit" class="btn btn-primary">Aggiungi</button>
+        </div>
+      </form>
+    </section>
+
+    <div class="section-title">📋 Lista negozi (<span id="count-stores">0</span>)</div>
+    <div id="stores-list" class="list"></div>
+    <div id="empty-state" class="empty-state" hidden>
+      <span class="icon">🏪</span>
+      Nessun negozio ancora.<br />Aggiungine uno per usarlo come lista a tendina nei vini.
+    </div>
+
+  </main>
+
+  <footer class="app-footer">Vini PWA · v1</footer>
+  <div id="toast-container"></div>
+
+  <script>
+    (() => {
+      'use strict';
+      const $ = (id) => document.getElementById(id);
+
+      function toast(msg, kind = '') {
+        const div = document.createElement('div');
+        div.className = 'toast' + (kind ? ' ' + kind : '');
+        div.textContent = msg;
+        $('toast-container').appendChild(div);
+        setTimeout(() => div.remove(), 3000);
+      }
+
+      async function loadStores() {
+        try {
+          const r = await fetch('/api/stores');
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const data = await r.json();
+          renderStores(data);
+        } catch (e) {
+          toast('Errore: ' + e.message, 'error');
+        }
+      }
+
+      function renderStores(stores) {
+        $('count-stores').textContent = stores.length;
+        const wrap = $('stores-list');
+        wrap.innerHTML = '';
+        const empty = $('empty-state');
+        if (!stores.length) { empty.hidden = false; return; }
+        empty.hidden = true;
+        for (const s of stores) {
+          const row = document.createElement('div');
+          row.className = 'wine-card';
+          row.innerHTML = `
+            <div class="thumb">🏪</div>
+            <div class="meta">
+              <div class="name"></div>
+              <div class="store"></div>
+            </div>
+            <div class="right">
+              <div class="row-actions">
+                <button class="btn btn-secondary" data-act="rename">✏️ Rinomina</button>
+                <button class="btn btn-danger"    data-act="delete">🗑️</button>
+              </div>
+            </div>
+          `;
+          row.querySelector('.name').textContent = s.name;
+          row.querySelector('.store').textContent = 'aggiunto ' + (s.created_at || '').slice(0, 10);
+
+          row.querySelector('[data-act="rename"]').addEventListener('click', async () => {
+            const next = prompt('Nuovo nome:', s.name);
+            if (next == null) return;
+            const v = next.trim();
+            if (!v || v === s.name) return;
+            try {
+              const r = await fetch('/api/stores/' + s.id, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: v })
+              });
+              const out = await r.json();
+              if (!r.ok) throw new Error(out.error || 'HTTP ' + r.status);
+              toast('Aggiornato', 'success');
+              loadStores();
+            } catch (e) { toast(e.message, 'error'); }
+          });
+
+          row.querySelector('[data-act="delete"]').addEventListener('click', async () => {
+            if (!confirm(`Eliminare "${s.name}"? I vini associati non avranno più un negozio.`)) return;
+            try {
+              const r = await fetch('/api/stores/' + s.id, { method: 'DELETE' });
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              toast('Eliminato', 'success');
+              loadStores();
+            } catch (e) { toast(e.message, 'error'); }
+          });
+
+          wrap.appendChild(row);
+        }
+      }
+
+      $('store-form').addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const name = $('store-name').value.trim();
+        if (!name) return;
+        try {
+          const r = await fetch('/api/stores', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+          });
+          const out = await r.json();
+          if (!r.ok) throw new Error(out.error || 'HTTP ' + r.status);
+          $('store-name').value = '';
+          toast('Aggiunto', 'success');
+          loadStores();
+        } catch (e) { toast(e.message, 'error'); }
+      });
+
+      // marca tab attivo in base al path
+      const here = location.pathname;
+      document.querySelectorAll('.tab').forEach(t => {
+        if (t.getAttribute('href') === here) t.classList.add('active');
+        else t.classList.remove('active');
+      });
+
+      loadStores();
+    })();
+  </script>
+</body>
+</html>
