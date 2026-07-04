@@ -8,6 +8,7 @@ const fs = require('fs');
 const multer = require('multer');
 const initSqlJs = require('sql.js');
 const Jimp = require('jimp');
+const ExifParser = require('exif-parser');
 
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'vini.db');
@@ -114,8 +115,13 @@ async function ensurePhotoDir() {
 }
 
 async function processPhoto(inputPath, originalName) {
-  // legge, ridimensiona, ricompatta in JPEG e scrive su PHOTO_DIR.
+  // jimp 0.22 legge i pixel "così come sono" senza applicare EXIF Orientation,
+  // quindi se una foto iPhone è registrata in landscape ma va mostrata vertical
+  // (EXIF Orientation = 6), dobbiamo ruotare manualmente il bitmap.
+  const orientation = getJpegExifOrientation(inputPath);
+
   const img = await Jimp.read(inputPath);
+  applyExifOrientation(img, orientation);
   const w0 = img.bitmap.width;
   const h0 = img.bitmap.height;
   const longest = Math.max(w0, h0);
@@ -133,6 +139,45 @@ async function processPhoto(inputPath, originalName) {
   await img.writeAsync(outPath);
   try { fs.unlinkSync(inputPath); } catch (_) { /* ignore */ }
   return { filename, width: img.bitmap.width, height: img.bitmap.height };
+}
+
+// Restituisce il valore numerico del tag EXIF Orientation (1..8) presente nel JPEG,
+// cercando solo nei primi 64 KB dove risiede l'APP1/EXIF. Nessuna corrispondenza → 1.
+function getJpegExifOrientation(filePath) {
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(65536);
+    fs.readSync(fd, buf, 0, 65536, 0);
+    const result = ExifParser.create(buf).parse();
+    const o = result && result.tags && Number(result.tags.Orientation);
+    return Number.isInteger(o) && o >= 1 && o <= 8 ? o : 1;
+  } catch (_) {
+    return 1;
+  } finally {
+    if (fd != null) { try { fs.closeSync(fd); } catch (_) { /* ignore */ } }
+  }
+}
+
+// Applica la rotazione/mirror che "annulla" il tag EXIF Orientation sul bitmap.
+// jimp 0.22.x: img.rotate(deg) è orario (clockwise positive).
+//   O=3 → 180°     (foto capovolta)
+//   O=6 → +90° CW  (iPhone portrait: i pixel sono salvati ruotati di 90° CCW; serve CW per raddrizzarli)
+//   O=8 → 270° CW  (viceversa)
+//   2/4/5/7 → specchi + combinazioni (rari dalle foto utente)
+function applyExifOrientation(img, orientation) {
+  if (!orientation || orientation === 1) return;
+  switch (orientation) {
+    case 1: break;
+    case 2: img.flip(false, true); break;        // mirror orizzontale
+    case 3: img.rotate(180); break;
+    case 4: img.flip(true, false); break;        // mirror verticale
+    case 5: img.rotate(270).flip(false, true); break;
+    case 6: img.rotate(90); break;
+    case 7: img.rotate(90).flip(false, true); break;
+    case 8: img.rotate(270); break;
+    default: break;
+  }
 }
 
 // ---------- express setup ----------
