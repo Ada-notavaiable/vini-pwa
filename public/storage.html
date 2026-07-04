@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#6a1b3d" />
+  <title>Archiviazione — Vini PWA</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="/icon-192.png" type="image/png" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+</head>
+<body>
+  <header class="app-header">
+    <h1><span class="glass">💾</span> Archiviazione</h1>
+    <nav class="tabs">
+      <a class="tab" href="/" data-tab="vini">Vini</a>
+      <a class="tab" href="/negozi.html" data-tab="negozi">Negozi</a>
+      <a class="tab" href="/stats.html" data-tab="stats">Stats</a>
+      <a class="tab active" href="/storage.html" data-tab="storage">Archivio</a>
+    </nav>
+  </header>
+
+  <main class="container">
+
+    <section class="stat-grid">
+      <div class="stat-card">
+        <div class="value" id="stat-photo-count">—</div>
+        <div class="label">Foto salvate</div>
+      </div>
+      <div class="stat-card">
+        <div class="value" id="stat-photo-total">—</div>
+        <div class="label">Spazio foto</div>
+      </div>
+      <div class="stat-card">
+        <div class="value" id="stat-photo-avg">—</div>
+        <div class="label">Media per foto</div>
+      </div>
+      <div class="stat-card">
+        <div class="value" id="stat-db-size">—</div>
+        <div class="label">Database</div>
+      </div>
+    </section>
+
+    <div class="section-title">📦 Spazio disco (<span id="disk-path">/data</span>)</div>
+    <section class="form-card" id="disk-card">
+      <div class="disk-row">
+        <div class="disk-stat">
+          <div class="disk-value" id="disk-used">—</div>
+          <div class="disk-label">Usato (foto + DB)</div>
+        </div>
+        <div class="disk-stat">
+          <div class="disk-value" id="disk-free">—</div>
+          <div class="disk-label">Libero</div>
+        </div>
+        <div class="disk-stat">
+          <div class="disk-value" id="disk-total">—</div>
+          <div class="disk-label">Totale</div>
+        </div>
+      </div>
+      <div class="disk-bar-wrap">
+        <div class="disk-bar-track">
+          <div class="disk-bar-used" id="disk-bar-used"></div>
+          <div class="disk-bar-app" id="disk-bar-app"></div>
+        </div>
+        <div class="help-text" id="disk-bar-help">verde = usato da vini · rosso = resto del sistema</div>
+      </div>
+      <div id="disk-error" class="empty-state" hidden>
+        <span class="icon">⚠️</span>
+        Informazioni disco non disponibili su questo filesystem.
+      </div>
+    </section>
+
+    <div class="btn-group" style="margin-top:16px;">
+      <button type="button" class="btn btn-secondary" id="refresh-btn">🔄 Aggiorna</button>
+      <a href="/" class="btn btn-secondary">↩️ Torna ai vini</a>
+    </div>
+
+  </main>
+
+  <footer class="app-footer">Vini PWA · v1</footer>
+  <div id="toast-container"></div>
+
+  <script>
+    (() => {
+      'use strict';
+      const $ = (id) => document.getElementById(id);
+
+      function toast(msg, kind = '') {
+        const div = document.createElement('div');
+        div.className = 'toast' + (kind ? ' ' + kind : '');
+        div.textContent = msg;
+        $('toast-container').appendChild(div);
+        setTimeout(() => div.remove(), 3000);
+      }
+
+      function fmtBytes(n) {
+        if (n == null) return '—';
+        if (n === 0) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let i = 0;
+        let v = Number(n);
+        while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+        return v.toFixed(v >= 100 || i === 0 ? 0 : v >= 10 ? 1 : 2) + ' ' + units[i];
+      }
+
+      async function load() {
+        try {
+          const r = await fetch('/api/storage');
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const s = await r.json();
+
+          $('stat-photo-count').textContent = s.photo_count ?? 0;
+          $('stat-photo-total').textContent = fmtBytes(s.photo_total_bytes);
+          $('stat-photo-avg').textContent = s.photo_count ? fmtBytes(s.photo_avg_bytes) : '—';
+          $('stat-db-size').textContent = fmtBytes(s.db_bytes);
+
+          const total = s.disk_total_bytes;
+          const free  = s.disk_free_bytes;
+          const app   = s.app_bytes;
+
+          if (total != null && free != null) {
+            const used = total - free;
+            $('disk-used').textContent = fmtBytes(used);
+            $('disk-free').textContent = fmtBytes(free);
+            $('disk-total').textContent = fmtBytes(total);
+
+            const pApp = Math.min(100, (app / total) * 100);
+            const pUsed = Math.min(100, (used / total) * 100);
+            $('disk-bar-app').style.width = pApp.toFixed(2) + '%';
+            // il "resto del sistema" è la parte usata_non_app
+            $('disk-bar-used').style.width = Math.max(0, pUsed - pApp).toFixed(2) + '%';
+
+            const freeGB = (free / (1024*1024*1024)).toFixed(2);
+            const warn = free < 500 * 1024 * 1024;
+            $('disk-bar-help').textContent = warn
+              ? '⚠️ meno di 500 MB liberi — controlla le foto e i backup'
+              : `🟢 Hai ${freeGB} GB liberi`;
+          } else {
+            $('disk-error').hidden = false;
+          }
+        } catch (e) {
+          toast('Errore: ' + e.message, 'error');
+        }
+      }
+
+      $('refresh-btn').addEventListener('click', () => { load(); toast('Aggiornato'); });
+
+      load();
+    })();
+  </script>
+</body>
+</html>

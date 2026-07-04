@@ -17,6 +17,7 @@
       <a class="tab" href="/" data-tab="vini">Vini</a>
       <a class="tab" href="/negozi.html" data-tab="negozi">Negozi</a>
       <a class="tab active" href="/stats.html" data-tab="stats">Stats</a>
+      <a class="tab" href="/storage.html" data-tab="storage">Archivio</a>
     </nav>
   </header>
 
@@ -143,8 +144,11 @@
             s.recent.forEach(w => {
               const card = document.createElement('div');
               card.className = 'wine-card';
+              const thumbH = w.photo_path
+                ? '<img src="/photos/' + encodeURIComponent(w.photo_path) + '" alt="" loading="lazy" />'
+                : '🍷';
               card.innerHTML = `
-                <div class="thumb">🍷</div>
+                <div class="thumb">${thumbH}</div>
                 <div class="meta">
                   <div class="name"></div>
                   <div class="store"></div>

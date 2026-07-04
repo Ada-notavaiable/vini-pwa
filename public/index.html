@@ -17,6 +17,7 @@
       <a class="tab active" href="/" data-tab="vini">Vini</a>
       <a class="tab" href="/negozi.html" data-tab="negozi">Negozi</a>
       <a class="tab" href="/stats.html" data-tab="stats">Stats</a>
+      <a class="tab" href="/storage.html" data-tab="storage">Archivio</a>
     </nav>
   </header>
 
@@ -63,9 +64,18 @@
         </div>
 
         <div class="form-row">
-          <label for="wine-photo">Foto (opzionale)</label>
-          <input id="wine-photo" type="file" accept="image/*" />
-          <div class="help-text">Verrà ridimensionata automaticamente per risparmiare spazio.</div>
+          <label>Foto (opzionale)</label>
+          <input id="photo-input-gallery" type="file" accept="image/*" hidden />
+          <input id="photo-input-camera"  type="file" accept="image/*" capture="environment" hidden />
+          <div class="photo-buttons">
+            <button type="button" class="btn btn-secondary" id="btn-choose-photo">
+              <span aria-hidden="true">📁</span> Scegli foto
+            </button>
+            <button type="button" class="btn btn-secondary" id="btn-take-photo">
+              <span aria-hidden="true">📷</span> Scatta foto
+            </button>
+          </div>
+          <div class="help-text">Verrà ridimensionata a 1024 px e salvata come JPEG per risparmiare spazio (max 8 MB in ingresso).</div>
           <div class="photo-preview" id="photo-preview" hidden>
             <img id="photo-preview-img" src="" alt="anteprima" />
             <button type="button" class="btn btn-danger" id="remove-photo-btn">Rimuovi foto</button>

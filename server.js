@@ -321,6 +321,50 @@ app.delete('/api/wines/:id/photo', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- API: storage (foto, DB, disco) ----------
+
+app.get('/api/storage', (req, res) => {
+  try {
+    // Conta e somma le dimensioni dei file nella PHOTO_DIR.
+    let photoCount = 0;
+    let photoBytes = 0;
+    if (fs.existsSync(PHOTO_DIR)) {
+      const files = fs.readdirSync(PHOTO_DIR);
+      for (const f of files) {
+        try {
+          const st = fs.statSync(path.join(PHOTO_DIR, f));
+          if (st.isFile()) { photoCount++; photoBytes += st.size; }
+        } catch (_) { /* file in race → ignora */ }
+      }
+    }
+    // Dimensione del DB SQLite.
+    let dbBytes = 0;
+    try {
+      if (fs.existsSync(DB_PATH)) dbBytes = fs.statSync(DB_PATH).size;
+    } catch (_) { /* ignore */ }
+
+    // Spazio disco: fs.statfs richiede Node 18.15+ (node:20-alpine ok).
+    let diskTotal = null, diskFree = null;
+    try {
+      const sf = fs.statfsSync ? fs.statfsSync(PHOTO_DIR) : fs.statfs(PHOTO_DIR);
+      diskTotal = sf.blocks * sf.bsize;
+      diskFree  = sf.bavail * sf.bsize;
+    } catch (_) { /* vecchia Node o filesystem non supportato */ }
+
+    res.json({
+      photo_count: photoCount,
+      photo_total_bytes: photoBytes,
+      photo_avg_bytes: photoCount ? Math.round(photoBytes / photoCount) : 0,
+      db_bytes: dbBytes,
+      app_bytes: photoBytes + dbBytes,
+      disk_total_bytes: diskTotal,
+      disk_free_bytes: diskFree
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 // ---------- API: stats ----------
 
 app.get('/api/stats', (req, res) => {
@@ -348,7 +392,7 @@ app.get('/api/stats', (req, res) => {
        LIMIT 12`
   );
   const recent = getAll(
-    `SELECT w.id, w.name, w.rating, w.created_at, s.name AS store_name
+    `SELECT w.id, w.name, w.rating, w.created_at, w.photo_path, s.name AS store_name
        FROM wines w LEFT JOIN stores s ON s.id = w.store_id
        ORDER BY w.created_at DESC
        LIMIT 10`

@@ -48,6 +48,8 @@
 
   let editingId = null;
   let currentPhotoPath = null;
+  let pendingPhotoFile = null;     // File scelto/scattato ma non ancora uploadato
+  let pendingPhotoUrl = null;      // ObjectURL associato al File (per revocarlo)
   let deferredInstallPrompt = null;
 
   // ---------- online status ----------
@@ -138,21 +140,25 @@
 
   // ---------- form logic ----------
 
+  function clearPendingPhoto() {
+    if (pendingPhotoUrl) { URL.revokeObjectURL(pendingPhotoUrl); pendingPhotoUrl = null; }
+    pendingPhotoFile = null;
+    $('photo-preview').hidden = true;
+    $('photo-preview-img').src = '';
+  }
+
   function resetForm() {
     editingId = null;
     currentPhotoPath = null;
     $('wine-id').value = '';
     $('wine-name').value = '';
     $('wine-note').value = '';
-    $('wine-photo').value = '';
     $('wine-store').value = '';
-    // reset rating
     document.querySelectorAll('input[name="rating"]').forEach(r => r.checked = false);
     $('form-title').textContent = 'Aggiungi vino';
     $('save-btn').textContent = 'Salva';
     $('cancel-edit-btn').hidden = true;
-    $('photo-preview').hidden = true;
-    $('photo-preview-img').src = '';
+    clearPendingPhoto();
   }
 
   function beginEdit(w) {
@@ -162,23 +168,42 @@
     $('wine-name').value = w.name || '';
     $('wine-note').value = w.note || '';
     $('wine-store').value = w.store_id || '';
-    // imposta rating
     const r = parseInt(w.rating, 10);
     const radio = document.getElementById('r' + r);
     if (radio) radio.checked = true;
-    // foto preview se presente
     if (w.photo_path) {
       $('photo-preview').hidden = false;
       $('photo-preview-img').src = '/photos/' + encodeURIComponent(w.photo_path);
     } else {
-      $('photo-preview').hidden = true;
-      $('photo-preview-img').src = '';
+      clearPendingPhoto();
     }
     $('form-title').textContent = 'Modifica: ' + (w.name || '');
     $('save-btn').textContent = 'Aggiorna';
     $('cancel-edit-btn').hidden = false;
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
+
+  // ---------- photo input (Scegli foto + Scatta foto) ----------
+
+  function bindPhotoFileInput(input) {
+    input.addEventListener('change', () => {
+      const f = input.files && input.files[0];
+      if (f) {
+        clearPendingPhoto();
+        pendingPhotoFile = f;
+        pendingPhotoUrl = URL.createObjectURL(f);
+        $('photo-preview-img').src = pendingPhotoUrl;
+        $('photo-preview').hidden = false;
+      }
+      // reset per permettere di scegliere lo stesso file di nuovo
+      input.value = '';
+    });
+  }
+  bindPhotoFileInput($('photo-input-gallery'));
+  bindPhotoFileInput($('photo-input-camera'));
+
+  $('btn-choose-photo').addEventListener('click', () => $('photo-input-gallery').click());
+  $('btn-take-photo').addEventListener('click', () => $('photo-input-camera').click());
 
   async function uploadPhoto(wineId, file) {
     const fd = new FormData();
@@ -196,16 +221,13 @@
 
   $('remove-photo-btn').addEventListener('click', async () => {
     if (!editingId) {
-      // stiamo aggiungendo — basta non allegare la foto nel submit
-      $('photo-preview').hidden = true;
-      $('photo-preview-img').src = '';
-      $('wine-photo').value = '';
+      // in fase di creazione: la foto era solo locale, basta scartarla
+      clearPendingPhoto();
     } else {
       try {
         await removePhoto(editingId);
         currentPhotoPath = null;
-        $('photo-preview').hidden = true;
-        $('photo-preview-img').src = '';
+        clearPendingPhoto();
         toast('Foto rimossa', 'success');
         loadWines();
       } catch (e) {
@@ -237,11 +259,9 @@
         const out = await api('/api/wines', { method: 'POST', body: JSON.stringify(payload) });
         wineId = out.id;
       }
-      // upload foto se presente
-      const file = $('wine-photo').files[0];
-      if (file) {
+      if (pendingPhotoFile) {
         try {
-          await uploadPhoto(wineId, file);
+          await uploadPhoto(wineId, pendingPhotoFile);
           toast(editingId ? 'Vino aggiornato e foto caricata' : 'Vino aggiunto e foto caricata', 'success');
         } catch (e) {
           toast('Vino salvato, ma foto non caricata: ' + e.message, 'error');
@@ -277,7 +297,6 @@
 
   // ---------- PWA install prompt ----------
 
-  // mount del pulsante install nel nav (event-driven, niente polling)
   function mountInstallBtn() {
     if (!deferredInstallPrompt) return;
     if (document.getElementById('install-btn')) return;
@@ -304,7 +323,6 @@
 
   // ---------- avvio ----------
 
-  // marca tab attivo
   const here = location.pathname;
   document.querySelectorAll('.tab').forEach(t => {
     if (t.getAttribute('href') === here) t.classList.add('active');
