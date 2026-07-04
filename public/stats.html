@@ -56,6 +56,14 @@
   <footer class="app-footer">Vini PWA · v1</footer>
   <div id="toast-container"></div>
 
+  <!-- Lightbox per ingrandire le immagini -->
+  <div class="modal-backdrop image-lightbox-backdrop" id="image-lightbox" aria-hidden="true">
+    <div class="image-lightbox" role="dialog" aria-modal="true" aria-label="Immagine ingrandita">
+      <button type="button" class="image-lightbox-close" id="image-lightbox-close" aria-label="Chiudi">✕</button>
+      <img id="image-lightbox-img" src="" alt="" />
+    </div>
+  </div>
+
   <script>
     (() => {
       'use strict';
@@ -68,6 +76,74 @@
         $('toast-container').appendChild(div);
         setTimeout(() => div.remove(), 3000);
       }
+
+      // ---------- lightbox immagini ----------
+
+      let lastTrigger = null;
+      let clearImgTimer = null;
+
+      function openImageLightbox(src, trigger, altText) {
+        const lb = $('image-lightbox');
+        const img = $('image-lightbox-img');
+
+        // Evita che un timer di chiusura precedente cancelli l'immagine appena aperta
+        if (clearImgTimer) { clearTimeout(clearImgTimer); clearImgTimer = null; }
+
+        lastTrigger = trigger || null;
+        img.src = src;
+        img.alt = altText || '';
+        lb.classList.add('open');
+        lb.setAttribute('aria-hidden', 'false');
+        document.body.style.overflow = 'hidden';
+
+        // Sposta il focus sul pulsante di chiusura per accessibilità tastiera
+        const closeBtn = $('image-lightbox-close');
+        if (closeBtn) {
+          try { closeBtn.focus({ preventScroll: true }); } catch (_) { closeBtn.focus(); }
+        }
+      }
+
+      function closeImageLightbox() {
+        const lb = $('image-lightbox');
+        const img = $('image-lightbox-img');
+
+        lb.classList.remove('open');
+        lb.setAttribute('aria-hidden', 'true');
+        // Ripristina sempre lo scroll del body, anche in caso di errore
+        document.body.style.overflow = '';
+
+        if (clearImgTimer) clearTimeout(clearImgTimer);
+        clearImgTimer = setTimeout(() => { img.src = ''; img.alt = ''; clearImgTimer = null; }, 200);
+
+        // Ripristina il focus sull'elemento che ha aperto il lightbox
+        if (lastTrigger && typeof lastTrigger.focus === 'function') {
+          try { lastTrigger.focus({ preventScroll: true }); } catch (_) { lastTrigger.focus(); }
+        }
+        lastTrigger = null;
+      }
+
+      // Apertura: clic su qualsiasi thumb nella pagina (gestito in delega)
+      document.addEventListener('click', (ev) => {
+        const thumb = ev.target.closest('.thumb img');
+        if (thumb && thumb.src) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const card = thumb.closest('.wine-card');
+          const altText = card ? (card.querySelector('.name')?.textContent || '').trim() : '';
+          openImageLightbox(thumb.src, thumb, altText);
+        }
+      });
+
+      // Chiusura: pulsante, backdrop, tasto Esc
+      $('image-lightbox-close').addEventListener('click', closeImageLightbox);
+      $('image-lightbox').addEventListener('click', (ev) => {
+        if (ev.target === $('image-lightbox')) closeImageLightbox();
+      });
+      document.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' && $('image-lightbox').classList.contains('open')) {
+          closeImageLightbox();
+        }
+      });
 
       function renderStars(rating) {
         // rappresentazione compatta: pallini pieni fino al rating

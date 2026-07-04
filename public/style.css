@@ -264,6 +264,8 @@ textarea { resize: vertical; min-height: 60px; }
   border-radius: var(--radius-sm);
 }
 
+.wine-card .thumb img { cursor: zoom-in; }
+
 .wine-card .meta {
   min-width: 0;
 }
@@ -552,6 +554,69 @@ textarea { resize: vertical; min-height: 60px; }
 .photo-buttons .btn {
   flex: 1 1 0;
   min-width: 140px;
+}
+
+/* ---------- lightbox immagini (stats page) ---------- */
+
+/* Sovrascrive il comportamento bottom-sheet della .modal-backdrop generica:
+   il lightbox deve essere sempre centrato, anche su mobile. */
+#image-lightbox {
+  align-items: center;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+           max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+
+.image-lightbox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 95vw;
+  max-height: 92vh;
+  pointer-events: auto;
+}
+
+.image-lightbox img {
+  display: block;
+  max-width: 95vw;
+  max-height: 88vh;
+  width: auto;
+  height: auto;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-strong);
+  object-fit: contain;
+  -webkit-user-drag: none;
+}
+
+.image-lightbox-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--primary-dark);
+  color: #fff;
+  border: 2px solid #fff;
+  font-size: 1.1rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-strong);
+  z-index: 1;
+  line-height: 1;
+  padding: 0;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.image-lightbox-close:hover { background: var(--primary); }
+.image-lightbox-close:active { transform: scale(0.94); }
+.image-lightbox-close:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ---------- disco / archiviazione ---------- */
