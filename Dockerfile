@@ -14,9 +14,12 @@ RUN npm install --omit=dev && npm cache clean --force
 COPY --chown=node:node server.js ./
 COPY --chown=node:node public ./public
 COPY --chown=node:node entrypoint.sh ./
+# Forza il bit di esecuzione: git-download non sempre preserva +x (soprattutto
+# quando Portainer clona la repo o scarica lo zip da GitHub).
+RUN chmod +x /app/entrypoint.sh
 
-# Persistent directories (DB, photos).
-RUN mkdir -p /data/photos && chown -R node:node /data
+# NB: /data e /data/photos li crea e chown-a `entrypoint.sh` a ogni avvio,
+# perché a runtime sono sovrascitti dal volume `vinidata`.
 
 # Healthcheck: start-period generoso perché il primo boot deve
 # scaldare la cache di rete per jimp & sql.js.
