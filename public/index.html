@@ -41,6 +41,30 @@
         </div>
 
         <div class="form-row">
+          <label>Tipo</label>
+          <div class="radio-group" role="radiogroup" aria-label="Tipo di vino">
+            <label class="radio-pill">
+              <input type="radio" name="wine_type" value="bianco" />
+              <span>🍾 Bianco</span>
+            </label>
+            <label class="radio-pill">
+              <input type="radio" name="wine_type" value="rosso" />
+              <span>🍷 Rosso</span>
+            </label>
+            <label class="radio-pill">
+              <input type="radio" name="wine_type" value="" checked />
+              <span>— N/D</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label for="wine-price">Prezzo (€)</label>
+          <input id="wine-price" type="number" min="0" step="0.01" inputmode="decimal" placeholder="Es. 12,50" />
+          <div class="help-text">Opzionale. Usa la virgola come separatore decimale.</div>
+        </div>
+
+        <div class="form-row">
           <label>Voto (1–10) *</label>
           <div class="stars" id="stars-input" role="radiogroup" aria-label="Voto">
             <!-- 10 → 1 -->

@@ -48,12 +48,24 @@ async function initDb() {
       rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 10),
       note TEXT,
       photo_path TEXT,
+      wine_type TEXT,
+      price REAL,
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE SET NULL
     );
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_wines_created_at ON wines(created_at DESC);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_wines_rating ON wines(rating DESC);`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_wines_wine_type ON wines(wine_type);`);
+
+  // Migrazione: aggiunge le colonne nuove ai DB creati prima dell'introduzione di wine_type/price.
+  // PRAGMA table_info evita di mascherare errori veri con un try/catch sul ALTER TABLE.
+  const wineCols = db.exec(`PRAGMA table_info(wines)`);
+  if (wineCols.length) {
+    const cols = wineCols[0].values.map(c => c[1]);
+    if (!cols.includes('wine_type')) db.run(`ALTER TABLE wines ADD COLUMN wine_type TEXT`);
+    if (!cols.includes('price')) db.run(`ALTER TABLE wines ADD COLUMN price REAL`);
+  }
 
   saveDB(true);
 }
@@ -277,7 +289,7 @@ app.get('/api/wines', (req, res) => {
   // created_at esiste sia in wines che in stores → va sempre qualificato w.x.
   const sort = req.query.sort === 'rating' ? 'w.rating DESC, w.created_at DESC' : 'w.created_at DESC';
   const rows = getAll(
-    `SELECT w.id, w.name, w.store_id, w.rating, w.note, w.photo_path, w.created_at,
+    `SELECT w.id, w.name, w.store_id, w.rating, w.note, w.photo_path, w.wine_type, w.price, w.created_at,
             s.name AS store_name
        FROM wines w LEFT JOIN stores s ON s.id = w.store_id
        ORDER BY ${sort}
@@ -313,9 +325,23 @@ app.post('/api/wines', (req, res) => {
   if (storeId !== null && !getOne(`SELECT id FROM stores WHERE id=?`, [storeId])) {
     return res.status(400).json({ error: 'store_id non valido' });
   }
+
+  const wT = req.body?.wine_type;
+  if (wT != null && wT !== '' && !['bianco','rosso'].includes(String(wT))) {
+    return res.status(400).json({ error: 'wine_type non valido (ammessi: bianco, rosso o null)' });
+  }
+  const wineType = (wT == null || wT === '') ? null : String(wT);
+
+  const p = req.body?.price;
+  const priceNum = (p == null || p === '') ? null : Number(String(p).replace(',', '.'));
+  if (priceNum != null && (!Number.isFinite(priceNum) || priceNum < 0)) {
+    return res.status(400).json({ error: 'price non valido (serve numero >= 0)' });
+  }
+  const price = priceNum != null ? Math.round(priceNum * 100) / 100 : null;
+
   const id = runSql(
-    `INSERT INTO wines (name, store_id, rating, note) VALUES (?, ?, ?, ?)`,
-    [name, storeId, rating, note]
+    `INSERT INTO wines (name, store_id, rating, note, wine_type, price) VALUES (?, ?, ?, ?, ?, ?)`,
+    [name, storeId, rating, note, wineType, price]
   );
   saveDB();
   res.json({ id });
@@ -340,9 +366,22 @@ app.put('/api/wines/:id', (req, res) => {
     return res.status(400).json({ error: 'store_id non valido' });
   }
 
+  const wT = req.body?.wine_type;
+  if (wT != null && wT !== '' && !['bianco','rosso'].includes(String(wT))) {
+    return res.status(400).json({ error: 'wine_type non valido (ammessi: bianco, rosso o null)' });
+  }
+  const wineType = (wT == null || wT === '') ? null : String(wT);
+
+  const p = req.body?.price;
+  const priceNum = (p == null || p === '') ? null : Number(String(p).replace(',', '.'));
+  if (priceNum != null && (!Number.isFinite(priceNum) || priceNum < 0)) {
+    return res.status(400).json({ error: 'price non valido (serve numero >= 0)' });
+  }
+  const price = priceNum != null ? Math.round(priceNum * 100) / 100 : null;
+
   runSql(
-    `UPDATE wines SET name=?, store_id=?, rating=?, note=? WHERE id=?`,
-    [name, storeId, rating, note, id]
+    `UPDATE wines SET name=?, store_id=?, rating=?, note=?, wine_type=?, price=? WHERE id=?`,
+    [name, storeId, rating, note, wineType, price, id]
   );
   saveDB();
   res.json({ ok: true });
@@ -453,12 +492,57 @@ app.get('/api/stats', (req, res) => {
        ORDER BY w.rating DESC, w.created_at DESC
        LIMIT 5`
   );
-  const byStore = getAll(
-    `SELECT s.id, s.name, COUNT(w.id) AS count, ROUND(AVG(w.rating), 2) AS avg_rating
-       FROM stores s LEFT JOIN wines w ON w.store_id = s.id
-       GROUP BY s.id, s.name
-       ORDER BY count DESC, s.name ASC`
+  // Per la sezione "vini per negozio" raggruppati per tipo carico tutti i vini in un colpo solo
+  // (sono in genere centinaia, non migliaia) e poi li partiziono in memoria. Restituisce un array
+  // di negozi con conteggi per ciascun tipo e gli elenchi completi dei vini divisi per tipo,
+  // così la pagina stats può renderizzare un blocco espandibile senza round-trip aggiuntivi.
+  const allWines = getAll(
+    `SELECT w.id, w.name, w.store_id, w.rating, w.price, w.wine_type,
+            substr(w.created_at, 1, 10) AS date
+       FROM wines w
+       ORDER BY w.created_at DESC`
   );
+  // Carica tutti i negozi in un colpo solo: evita N+1 query nel loop di partizione.
+  const storesById = new Map();
+  for (const s of getAll(`SELECT id, name FROM stores`)) {
+    storesById.set(Number(s.id), s.name);
+  }
+  const byStoreMap = new Map();
+  for (const w of allWines) {
+    if (w.store_id == null) continue;
+    let s = byStoreMap.get(Number(w.store_id));
+    if (!s) {
+      const sName = storesById.get(Number(w.store_id));
+      if (!sName) continue;
+      s = {
+        id: Number(w.store_id), name: sName,
+        count: 0, avg_rating: null,
+        count_bianco: 0, count_rosso: 0, count_null: 0,
+        wines: { bianco: [], rosso: [], null_type: [] },
+        _ratingsSum: 0, _ratingsN: 0,
+      };
+      byStoreMap.set(Number(w.store_id), s);
+    }
+    s.count++;
+    if (Number.isInteger(w.rating)) { s._ratingsSum += w.rating; s._ratingsN++; }
+    const slot = w.wine_type === 'bianco' ? 'bianco'
+                : w.wine_type === 'rosso'  ? 'rosso'
+                : 'null_type';
+    if (slot === 'bianco') s.count_bianco++;
+    else if (slot === 'rosso') s.count_rosso++;
+    else s.count_null++;
+    s.wines[slot].push({ id: w.id, name: w.name, rating: w.rating, price: w.price, date: w.date });
+  }
+  const byStore = Array.from(byStoreMap.values()).map(s => {
+    const o = {
+      id: s.id, name: s.name, count: s.count,
+      avg_rating: s._ratingsN > 0 ? +(s._ratingsSum / s._ratingsN).toFixed(2) : null,
+      count_bianco: s.count_bianco, count_rosso: s.count_rosso, count_null: s.count_null,
+      wines: s.wines,
+    };
+    return o;
+  }).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
   const byMonth = getAll(
     `SELECT substr(created_at, 1, 7) AS month, COUNT(*) AS count
        FROM wines
@@ -467,7 +551,8 @@ app.get('/api/stats', (req, res) => {
        LIMIT 12`
   );
   const recent = getAll(
-    `SELECT w.id, w.name, w.rating, w.created_at, w.photo_path, s.name AS store_name
+    `SELECT w.id, w.name, w.rating, w.created_at, w.photo_path, w.wine_type, w.price,
+            s.name AS store_name
        FROM wines w LEFT JOIN stores s ON s.id = w.store_id
        ORDER BY w.created_at DESC
        LIMIT 10`
@@ -507,6 +592,8 @@ app.post('/api/wines/import-csv', upload.single('csv'), (req, res) => {
   const header = (rows[0] || []).map(h => (h || '').toLowerCase().trim());
   const idx = {
     name: header.indexOf('name'),
+    type: header.indexOf('type'),
+    price: header.indexOf('price'),
     store: header.indexOf('store'),
     rating: header.indexOf('rating'),
     note: header.indexOf('note'),
@@ -520,6 +607,26 @@ app.post('/api/wines/import-csv', upload.single('csv'), (req, res) => {
   const storesByName = new Map();
   for (const s of getAll('SELECT id, name FROM stores')) {
     storesByName.set(String(s.name).toLowerCase().trim(), s.id);
+  }
+
+  // Helper: normalizza la stringa del tipo di vino.
+  // Accetta 'bianco','b','white'; 'rosso','r','red'; case-insensitive. Default null.
+  const TYPE_ALIASES = new Map([
+    ['bianco', 'bianco'], ['b', 'bianco'], ['white', 'bianco'],
+    ['rosso', 'rosso'],   ['r', 'rosso'],  ['red', 'rosso'],
+  ]);
+  function parseType(raw) {
+    if (raw == null) return null;
+    const s = String(raw).trim().toLowerCase();
+    if (!s) return null;
+    return TYPE_ALIASES.get(s) || null;
+  }
+  // Helper: normalizza il prezzo. Accetta virgola come separatore, restituisce numero o null.
+  function parsePrice(raw) {
+    if (raw == null || raw === '') return null;
+    const n = Number(String(raw).trim().replace(',', '.'));
+    if (!Number.isFinite(n) || n < 0) return null;
+    return Math.round(n * 100) / 100;
   }
 
   const errors = [];
@@ -547,13 +654,33 @@ app.post('/api/wines/import-csv', upload.single('csv'), (req, res) => {
       const createdAtSrc = (idx.created_at >= 0 && row[idx.created_at]) ? String(row[idx.created_at]).trim() : '';
       const useCreatedAt = /^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2})?$/.test(createdAtSrc);
 
+      // type: segnala valori non riconoscibili per non perdere dati in silenzio
+      const rawType = (idx.type >= 0 && row[idx.type] != null) ? String(row[idx.type]).trim() : '';
+      let wineType = null;
+      if (rawType !== '') {
+        wineType = parseType(rawType);
+        if (wineType == null) {
+          errors.push(`riga ${lineNo}: type "${rawType}" non riconosciuto (accettati: bianco, b, white, rosso, r, red) — ignorato`);
+        }
+      }
+
+      // price: idem, se il valore era presente ma non parsabile segnala
+      const rawPrice = (idx.price >= 0 && row[idx.price] != null) ? String(row[idx.price]).trim() : '';
+      let price = null;
+      if (rawPrice !== '') {
+        price = parsePrice(rawPrice);
+        if (price == null) {
+          errors.push(`riga ${lineNo}: price "${rawPrice}" non valido (serve numero >= 0) — ignorato`);
+        }
+      }
+
       try {
         if (useCreatedAt) {
-          runSql(`INSERT INTO wines (name, store_id, rating, note, created_at) VALUES (?, ?, ?, ?, ?)`,
-                 [name, storeId, rating, note, createdAtSrc]);
+          runSql(`INSERT INTO wines (name, store_id, rating, note, wine_type, price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                 [name, storeId, rating, note, wineType, price, createdAtSrc]);
         } else {
-          runSql(`INSERT INTO wines (name, store_id, rating, note) VALUES (?, ?, ?, ?)`,
-                 [name, storeId, rating, note]);
+          runSql(`INSERT INTO wines (name, store_id, rating, note, wine_type, price) VALUES (?, ?, ?, ?, ?, ?)`,
+                 [name, storeId, rating, note, wineType, price]);
         }
         imported++;
       } catch (e) {
@@ -581,13 +708,15 @@ function csvEscape(v) {
 
 app.get('/api/export/wines.csv', (req, res) => {
   const rows = getAll(
-    `SELECT w.id, w.name, s.name AS store, w.rating, w.note, w.photo_path, w.created_at
+    `SELECT w.id, w.name, w.wine_type, w.price, s.name AS store, w.rating, w.note, w.photo_path, w.created_at
        FROM wines w LEFT JOIN stores s ON s.id = w.store_id
        ORDER BY w.created_at DESC`
   );
-  const lines = ['id;name;store;rating;note;photo;created_at'];
+  const lines = ['id;name;type;price;store;rating;note;photo;created_at'];
   for (const r of rows) {
-    lines.push([r.id, r.name, r.store || '', r.rating, r.note || '', r.photo_path || '', r.created_at].map(csvEscape).join(';'));
+    // price viene esportato con il punto come separatore decimale (formato Excel-en).
+    const priceStr = r.price != null ? Number(r.price).toFixed(2).replace('.', ',') : '';
+    lines.push([r.id, r.name, r.wine_type || '', priceStr, r.store || '', r.rating, r.note || '', r.photo_path || '', r.created_at].map(csvEscape).join(';'));
   }
   // BOM UTF-8 → Excel su Windows apre correttamente gli accenti italiani.
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');

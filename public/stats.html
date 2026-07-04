@@ -145,6 +145,69 @@
         }
       });
 
+      function escapeHtml(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      }
+
+      function fmtPriceStats(p) {
+        if (p == null) return '';
+        const n = Number(p);
+        if (!Number.isFinite(n)) return '';
+        try {
+          return new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(n);
+        } catch (_) { return '€' + n.toFixed(2); }
+      }
+
+      function renderStoreGroup(s) {
+        const d = document.createElement('details');
+        d.className = 'store-details';
+        const sum = document.createElement('summary');
+        const avg = s.avg_rating != null ? ' · voto medio ' + Number(s.avg_rating).toFixed(1) : '';
+        const countBits = [];
+        if (s.count_bianco) countBits.push('<span class="count-tag bianco">🍾 ' + s.count_bianco + '</span>');
+        if (s.count_rosso)  countBits.push('<span class="count-tag rosso">🍷 ' + s.count_rosso + '</span>');
+        if (s.count_null)   countBits.push('<span class="count-tag null">N/D ' + s.count_null + '</span>');
+        sum.innerHTML =
+          '<div><strong>' + escapeHtml(s.name) + '</strong>' +
+          '<span class="help-text" style="margin-left:6px;">' +
+          s.count + ' vini' + avg +
+          '</span></div>' +
+          '<div class="store-counts">' + countBits.join('') + '</div>';
+        d.appendChild(sum);
+
+        const content = document.createElement('div');
+        content.className = 'store-content';
+
+        function addGroup(title, items, cls, badgeText) {
+          if (!items || !items.length) return;
+          const grp = document.createElement('div');
+          grp.className = 'wine-subgroup ' + (cls || '');
+          const h = document.createElement('h4');
+          h.innerHTML = badgeText + ' (' + items.length + ')';
+          grp.appendChild(h);
+          items.forEach(w => {
+            const row = document.createElement('div');
+            row.className = 'wine-row';
+            const bits = [];
+            if (w.rating != null) bits.push('voto ' + w.rating);
+            if (w.price != null) bits.push(fmtPriceStats(w.price));
+            if (w.date) bits.push(w.date);
+            row.innerHTML =
+              '<div>' + escapeHtml(w.name) + '</div>' +
+              '<div class="meta-w">' + escapeHtml(bits.join(' · ')) + '</div>';
+            grp.appendChild(row);
+          });
+          content.appendChild(grp);
+        }
+        addGroup('Bianchi',  s.wines && s.wines.bianco,    'bianco', '🍾 Bianchi');
+        addGroup('Rossi',     s.wines && s.wines.rosso,     'rosso',  '🍷 Rossi');
+        addGroup('Senza tipo', s.wines && s.wines.null_type, 'null',  'Senza tipo');
+        d.appendChild(content);
+        return d;
+      }
+
       function renderStars(rating) {
         // rappresentazione compatta: pallini pieni fino al rating
         const max = 10;
@@ -197,19 +260,7 @@
           if (!s.by_store || !s.by_store.length) {
             bs.innerHTML = '<div class="empty-state"><span class="icon">🏪</span>Nessun negozio.</div>';
           } else {
-            s.by_store.forEach(row => {
-              const r = document.createElement('div');
-              r.className = 'rank-row';
-              const avg = row.avg_rating != null ? ' · voto medio ' + Number(row.avg_rating).toFixed(1) : '';
-              r.innerHTML = `
-                <div><strong></strong><span class="help-text" style="margin-left:6px;"></span></div>
-                <div><strong></strong></div>
-              `;
-              r.querySelector('strong:first-of-type').textContent = row.name;
-              r.children[0].querySelector('.help-text').textContent = avg;
-              r.children[1].querySelector('strong').textContent = row.count + ' vini';
-              bs.appendChild(r);
-            });
+            s.by_store.forEach(row => bs.appendChild(renderStoreGroup(row)));
           }
 
           const rec = $('recent-wines');

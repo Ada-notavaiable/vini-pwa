@@ -44,6 +44,21 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  function fmtPrice(p) {
+    if (p == null || !Number.isFinite(Number(p))) return '';
+    try {
+      return new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(Number(p));
+    } catch (_) {
+      return '€' + Number(p).toFixed(2);
+    }
+  }
+
+  function wineTypeBadge(wt) {
+    if (wt === 'bianco') return '<span class="wine-type-badge bianco" title="Vino bianco">🍾 Bianco</span>';
+    if (wt === 'rosso')  return '<span class="wine-type-badge rosso"  title="Vino rosso">🍷 Rosso</span>';
+    return '';
+  }
+
   // ---------- stato ----------
 
   let editingId = null;
@@ -151,9 +166,10 @@
         <button type="button" class="wine-delete-btn" aria-label="Elimina vino" title="Elimina">🗑</button>
         <div class="thumb">${thumbH}</div>
         <div class="meta">
-          <div class="name">${escapeHtml(w.name)}</div>
+          <div class="name">${escapeHtml(w.name)}${wineTypeBadge(w.wine_type)}</div>
           <div class="store">${escapeHtml(w.store_name || '— senza negozio —')}</div>
           ${w.note ? `<div class="note-preview">${escapeHtml(w.note)}</div>` : ''}
+          ${w.price != null && Number.isFinite(Number(w.price)) ? `<div class="price">${fmtPrice(w.price)}</div>` : ''}
         </div>
         <div class="right">
           ${fmtStarsReadonly(w.rating)}
@@ -206,10 +222,15 @@
     $('wine-note').value = '';
     $('wine-store').value = '';
     document.querySelectorAll('input[name="rating"]').forEach(r => r.checked = false);
+    // Tipo: nessuna selezione (N/D selezionato di default in HTML).
+    document.querySelectorAll('input[name="wine_type"]').forEach(r => { r.checked = (r.value === ''); });
+    $('wine-price').value = '';
     $('form-title').textContent = 'Aggiungi vino';
     $('save-btn').textContent = 'Salva';
     $('cancel-edit-btn').hidden = true;
     clearPendingPhoto();
+    // Sincronizza la classe .is-checked per il fallback Safari <15.4 (radio.checked non triggera 'change').
+    syncRadioPills && syncRadioPills('wine_type');
   }
 
   function beginEdit(w) {
@@ -222,6 +243,10 @@
     const r = parseInt(w.rating, 10);
     const radio = document.getElementById('r' + r);
     if (radio) radio.checked = true;
+    // Tipo: ripristina il valore salvato, o N/D se null/unknown.
+    const wT = (w.wine_type === 'bianco' || w.wine_type === 'rosso') ? w.wine_type : '';
+    document.querySelectorAll('input[name="wine_type"]').forEach(r => { r.checked = (r.value === wT); });
+    $('wine-price').value = (w.price != null && Number.isFinite(Number(w.price))) ? String(w.price) : '';
     if (w.photo_path) {
       $('photo-preview').hidden = false;
       $('photo-preview-img').src = '/photos/' + encodeURIComponent(w.photo_path);
@@ -232,6 +257,8 @@
     $('save-btn').textContent = 'Aggiorna';
     $('cancel-edit-btn').hidden = false;
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    // Sincronizza la classe .is-checked per il fallback Safari <15.4 (radio.checked non triggera 'change').
+    syncRadioPills && syncRadioPills('wine_type');
   }
 
   // ---------- photo input (Scegli foto + Scatta foto) ----------
@@ -298,7 +325,17 @@
     if (!name) { toast('Inserisci il nome del vino', 'error'); return; }
     if (!ratingEl) { toast('Scegli un voto da 1 a 10', 'error'); return; }
     const rating = parseInt(ratingEl.value, 10);
-    const payload = { name, store_id: storeId || null, rating, note };
+    const wineTypeEl = document.querySelector('input[name="wine_type"]:checked');
+    const wine_type = wineTypeEl ? wineTypeEl.value : '';
+    const priceRaw = $('wine-price').value.trim();
+    const payload = {
+      name,
+      store_id: storeId || null,
+      rating,
+      note,
+      wine_type: wine_type || null,
+      price: priceRaw === '' ? null : priceRaw,
+    };
 
     $('save-btn').disabled = true;
     try {
@@ -422,6 +459,23 @@
     if (t.getAttribute('href') === here) t.classList.add('active');
     else t.classList.remove('active');
   });
+
+  // Sincronizza la classe .is-checked sui radio-pill ad ogni cambio utente.
+  // Fallback per browser che non supportano :has() (Safari < 15.4) —
+  // senza questo, la pillola di sfondo non si accende quando selezionata.
+  function syncRadioPills(name) {
+    document.querySelectorAll('input[name="' + name + '"]').forEach(r => {
+      const label = r.closest('.radio-pill');
+      if (label) label.classList.toggle('is-checked', r.checked);
+    });
+  }
+  document.addEventListener('change', (ev) => {
+    const t = ev.target;
+    if (t && t.matches && t.matches('input[name="wine_type"]')) syncRadioPills('wine_type');
+  });
+
+  // Stato iniziale coerente con il DOM (radio checked di default = .is-checked).
+  syncRadioPills('wine_type');
 
   loadStores('wine-store');
   loadWines();

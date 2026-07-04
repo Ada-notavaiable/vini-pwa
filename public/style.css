@@ -590,6 +590,127 @@ textarea { resize: vertical; min-height: 60px; }
   min-width: 140px;
 }
 
+/* ---------- wine type badge + prezzo ---------- */
+
+.wine-type-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  margin-left: 6px;
+  vertical-align: middle;
+  font-weight: 600;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.wine-type-badge.bianco { background: #f0ead3; color: #6b5b14; border-color: #e2d8a0; }
+.wine-type-badge.rosso  { background: #f4d9d9; color: #8b3a3a; border-color: #e2b4b4; }
+
+.wine-card .meta .price {
+  font-size: 0.85rem;
+  color: var(--text-soft);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- radio pills (wine_type nel form) ---------- */
+
+.radio-group { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.radio-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--text-soft);
+  font-size: 0.88rem;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.05s;
+  user-select: none;
+}
+.radio-pill input { accent-color: var(--primary); margin: 0; }
+.radio-pill:has(input:checked),
+.radio-pill.is-checked {
+  background: var(--accent);
+  color: var(--primary-dark);
+  font-weight: 600;
+  border-color: var(--accent);
+}
+.radio-pill:active { transform: translateY(1px); }
+
+/* ---------- stats: negozi espandibili con sotto-blocchi bianco/rosso ---------- */
+
+.store-details {
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  margin-bottom: 4px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  overflow: hidden;
+}
+
+.store-details > summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  gap: 8px;
+}
+.store-details > summary::-webkit-details-marker { display: none; }
+.store-details > summary::after {
+  content: '\25B6';
+  color: var(--muted);
+  margin-left: 8px;
+  transition: transform 0.15s;
+  font-size: 0.7rem;
+}
+.store-details[open] > summary::after { transform: rotate(90deg); }
+
+.store-counts { display: flex; gap: 4px; flex-wrap: wrap; }
+.count-tag {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: var(--surface-soft);
+  color: var(--text-soft);
+  border: 1px solid var(--border);
+}
+.count-tag.bianco { background: #f0ead3; color: #6b5b14; border-color: #e2d8a0; }
+.count-tag.rosso  { background: #f4d9d9; color: #8b3a3a; border-color: #e2b4b4; }
+
+.store-content { padding: 0 12px 10px 12px; }
+.wine-subgroup { margin-top: 4px; }
+.wine-subgroup h4 {
+  margin: 8px 0 4px 0;
+  font-size: 0.78rem;
+  color: var(--primary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 700;
+}
+.wine-subgroup.null h4 { color: var(--text-soft); }
+
+.wine-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 6px;
+  font-size: 0.86rem;
+  border-bottom: 1px dashed var(--border);
+  color: var(--text);
+  gap: 8px;
+}
+.wine-row:last-child { border-bottom: none; }
+.wine-row .meta-w { color: var(--text-soft); font-size: 0.75rem; white-space: nowrap; }
+
 /* ---------- lightbox immagini (stats page) ---------- */
 
 /* Sovrascrive il comportamento bottom-sheet della .modal-backdrop generica:
