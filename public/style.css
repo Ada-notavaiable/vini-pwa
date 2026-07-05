@@ -876,9 +876,12 @@ textarea { resize: vertical; min-height: 60px; }
   text-decoration: line-through;
 }
 
-/* Scope PER-store: bianco e rosso sono indipendenti. */
-.store-details.hide-bianchi .wine-subgroup.bianco { display: none; }
-.store-details.hide-rosso   .wine-subgroup.rosso  { display: none; }
+/* Scope PER-store: bianco e rosso sono indipendenti.
+   Le classi applicate dal JS sono '.hide-' + dataset.target del bottone
+   ('bianco' | 'rosso'), quindi .hide-bianco / .hide-rosso (senza 'i' finale
+   su "bianco"). */
+.store-details.hide-bianco .wine-subgroup.bianco { display: none; }
+.store-details.hide-rosso  .wine-subgroup.rosso  { display: none; }
 
 /* ---------- wine detail modal (popup stats) ---------- */
 
