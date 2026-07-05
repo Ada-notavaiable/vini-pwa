@@ -1,8 +1,11 @@
 # Compose file pensato per Portainer Stacks.
 # Funziona anche con `docker compose up -d --build`.
 #
-# Variabili d'ambiente (impostabili nella UI di Portainer allo stack):
-#   HOST_PORT  - porta TCP esposta sull'host (default 3100)
+# Porta host TCP esposta sull'Orange Pi: HARDCODED a 3100 (vedi sezione "ports").
+# Per cambiarla, modifica direttamente la voce "ports:" qui sotto — niente più env var.
+# (Il progetto fratello `orto` occupa già la 3000 sull'host: 3100 è la scelta sicura.)
+#
+# Variabili d'ambiente restanti (impostabili nella UI di Portainer allo stack):
 #   TZ         - fuso orario del container (es. Europe/Rome)
 #   NODE_ENV   - production | development
 
@@ -14,7 +17,9 @@ services:
     image: vinipwa:latest
     restart: unless-stopped
     ports:
-      - "${HOST_PORT:-3100}:3000"
+      # 3100 sull'host → 3000 nel container (server.js).
+      # Hardcoded: rimossa la env var HOST_PORT per evitare il conflitto con `orto`.
+      - "3100:3000"
     volumes:
       - vinidata:/data
     # Limiti pensati per Orange Pi Zero / piccole board ARM.

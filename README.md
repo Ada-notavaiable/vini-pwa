@@ -60,9 +60,9 @@ git push -u origin main
    - **Compose path**: `docker-compose.yml`
 4. Spunta **Automatic updates** se vuoi che Portainer ricontrolli la repo automaticamente (intervallo di default 5 minuti, configurabile per-stack).
 5. Nella sezione **Environment variables** puoi sovrascrivere:
-   - `HOST_PORT` — porta esposta sull'Orange Pi (default `3100`, perché 3000 è già usata dal progetto `orto`)
    - `TZ` — fuso orario, es. `Europe/Rome`
    - `NODE_ENV` — `production` di default
+   (La porta host è **hardcoded a `3100`** in `docker-compose.yml` per non collidere con il progetto `orto` che usa già la `3000`. Non serve più configurarla, né da UI né da env var.)
 6. Clicca **Deploy the stack**.
 
 Portainer clonerà la repo, builda l'immagine e avvia il container.
@@ -100,11 +100,10 @@ Tutte opzionali; i default funzionano su un'installazione standard.
 
 | Variabile | Default | Descrizione |
 | --- | --- | --- |
-| `HOST_PORT` | `3100` | Porta TCP esposta sull'host (nel compose). |
 | `TZ` | `Europe/Rome` | Fuso orario del container. |
 | `NODE_ENV` | `production` | Modalità Node. |
 
-Le altre variabili usate dal server (`PORT`, `DB_PATH`, `PHOTO_DIR`) sono cablate nel compose e di norma non vanno toccate.
+Le altre variabili usate dal server (`PORT`, `DB_PATH`, `PHOTO_DIR`) e la porta host (`3100`) sono cablate nel compose e di norma non vanno toccate. Per cambiare la porta host modifica direttamente `docker-compose.yml`.
 
 Per un'installazione locale senza Portainer puoi copiare `.env.example` in `.env` e modificare i valori.
 
@@ -118,6 +117,8 @@ DB_PATH=./vini.db PHOTO_DIR=./photos npm start
 ```
 
 Apri `http://localhost:3000`.
+
+> Nota: in locale la porta coincide con quella del container (`3000`), mentre in deploy Docker la porta host esposta è `3100` ed è hardcoded in `docker-compose.yml` — non va più configurata via env var.
 
 ## Installazione "manuale" con Docker (no Portainer)
 
