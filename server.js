@@ -513,19 +513,24 @@ app.get('/api/stats', (req, res) => {
   }
   const byStoreMap = new Map();
   for (const w of allWines) {
-    if (w.store_id == null) continue;
-    let s = byStoreMap.get(Number(w.store_id));
+    // I vini SENZA negozio sono ora raggruppati in un blocco sintetico (id=null,
+    // name='— Senza negozio —') in modo che la pagina stats li mostri nello stesso
+    // stile delle sezioni per negozio (toggle 🍾/🍷, counter, card cliccabili).
+    // È ancora il consumers JS a renderizzare — qui ci limitiamo a produrre la sezione.
+    const isGrouped = w.store_id == null;
+    const sId = isGrouped ? '__null_store__' : Number(w.store_id);
+    let s = byStoreMap.get(sId);
     if (!s) {
-      const sName = storesById.get(Number(w.store_id));
+      const sName = isGrouped ? '— Senza negozio —' : storesById.get(Number(w.store_id));
       if (!sName) continue;
       s = {
-        id: Number(w.store_id), name: sName,
+        id: isGrouped ? null : Number(w.store_id), name: sName,
         count: 0, avg_rating: null,
         count_bianco: 0, count_rosso: 0, count_null: 0,
         wines: { bianco: [], rosso: [], null_type: [] },
         _ratingsSum: 0, _ratingsN: 0,
       };
-      byStoreMap.set(Number(w.store_id), s);
+      byStoreMap.set(sId, s);
     }
     s.count++;
     if (Number.isInteger(w.rating)) { s._ratingsSum += w.rating; s._ratingsN++; }
@@ -554,7 +559,13 @@ app.get('/api/stats', (req, res) => {
       wines: s.wines,
     };
     return o;
-  }).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }).sort((a, b) => {
+    // "Senza negozio" sempre in fondo (nessun id reale): ordina per count decrescente,
+    // poi per nome alfabetico. Il blocco sintetico va dopo tutti i negozi reali.
+    if (a.id === null && b.id !== null) return 1;
+    if (a.id !== null && b.id === null) return -1;
+    return b.count - a.count || a.name.localeCompare(b.name);
+  });
 
   const byMonth = getAll(
     `SELECT substr(created_at, 1, 7) AS month, COUNT(*) AS count
@@ -874,14 +885,34 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
     }
 
     // 3. Ricostruisci stores case-insensitive, riusando la mappa all'interno della transazione.
+    // Nota: NON ci fidiamo di last_insert_rowid() dopo INSERT in transazioni BEGIN/COMMIT di sql.js
+    // (storicamente inaffidabile quando si mescolano insert con id esplicito). Usiamo invece
+    // SELECT id FROM stores WHERE name = ? subito dopo l'INSERT: è deterministico e funziona
+    // anche con vincoli UNIQUE violati (il fallimento dell'INSERT produce una exception visibile).
     const storesByName = new Map();
     function getOrCreateStore(name) {
-      const key = String(name).toLowerCase().trim();
+      const safe = String(name).trim();
+      const key = safe.toLowerCase();
       if (!key) return null;
       if (storesByName.has(key)) return storesByName.get(key);
-      const id = runSql(`INSERT INTO stores (name) VALUES (?)`, [name]);
-      storesByName.set(key, Number(id));
-      return Number(id);
+      try {
+        db.run(`INSERT INTO stores (name) VALUES (?)`, [safe]);
+      } catch (e) {
+        // Possibile UNIQUE collision se per qualunque motivo esiste già un record con questo
+        // nome (in teoria impossibile dopo DELETE FROM stores, ma difesa in profondità).
+        const existing = getOne(`SELECT id FROM stores WHERE LOWER(name)=LOWER(?)`, [safe]);
+        if (existing) {
+          const id = Number(existing.id);
+          storesByName.set(key, id);
+          return id;
+        }
+        throw e;
+      }
+      const sel = getOne(`SELECT id FROM stores WHERE name = ?`, [safe]);
+      if (!sel) return null;
+      const id = Number(sel.id);
+      storesByName.set(key, id);
+      return id;
     }
     const TYPE_ALIASES = new Map([
       ['bianco', 'bianco'], ['b', 'bianco'], ['white', 'bianco'],
