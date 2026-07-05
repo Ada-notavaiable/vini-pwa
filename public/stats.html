@@ -43,7 +43,7 @@
     </section>
 
     <div class="help-text" style="margin: 0 0 12px 0;">
-      Tocca un negozio per espanderlo · un vino per i dettagli. 👁️ accanto al nome = mostra/nascondi 🍾 Bianchi e 🍷 Rossi di quel negozio.
+      Tocca un negozio per espanderlo · un vino per i dettagli. Tocca 🍾 o 🍷 accanto al nome per mostrare/nascondere solo quel tipo di vini di quel negozio.
     </div>
 
     <div class="section-title">🏪 Vini per negozio</div>
@@ -200,35 +200,35 @@
 
         const sum = document.createElement('summary');
         const avg = s.avg_rating != null ? ' · voto medio ' + Number(s.avg_rating).toFixed(1) : '';
+        // 🍾 Bianchi e 🍷 Rossi sono BOTTONI cliccabili: ognuno nasconde SOLO
+        // il proprio sottogruppo di QUEL negozio. "Senza tipo" resta uno span
+        // (non filtrabile).
         const countBits = [];
-        if (s.count_bianco) countBits.push('<span class="count-tag bianco">🍾 ' + s.count_bianco + '</span>');
-        if (s.count_rosso)  countBits.push('<span class="count-tag rosso">🍷 ' + s.count_rosso + '</span>');
+        if (s.count_bianco) countBits.push('<button type="button" class="subgroup-toggle-btn bianco" data-target="bianco" aria-pressed="true" title="Mostra/nascondi i 🍾 Bianchi di questo negozio">🍾 ' + s.count_bianco + '</button>');
+        if (s.count_rosso)  countBits.push('<button type="button" class="subgroup-toggle-btn rosso" data-target="rosso" aria-pressed="true" title="Mostra/nascondi i 🍷 Rossi di questo negozio">🍷 ' + s.count_rosso + '</button>');
         if (s.count_null)   countBits.push('<span class="count-tag null">N/D ' + s.count_null + '</span>');
         sum.innerHTML =
           '<div class="store-title-cell"><strong>' + escapeHtml(s.name) + '</strong>' +
           '<span class="help-text" style="margin-left:6px;">' +
           s.count + ' vini' + avg +
           '</span></div>' +
-          '<div class="store-counts">' + countBits.join('') + '</div>' +
-          '<button type="button" class="store-toggle-btn" aria-pressed="true" title="Mostra/nascondi 🍾 Bianchi e 🍷 Rossi di questo negozio">' +
-            '<span class="eye-show" aria-hidden="true">👁️</span>' +
-            '<span class="eye-hide" aria-hidden="true">🙈</span>' +
-          '</button>';
+          '<div class="store-counts">' + countBits.join('') + '</div>';
         d.appendChild(sum);
 
-        // Bind del toggle: aggiunge .hide-type al parent .store-details quando è "spento".
-        // "Senza tipo" resta sempre visibile.
-        const toggleBtn = sum.querySelector('.store-toggle-btn');
-        if (toggleBtn) {
-          toggleBtn.addEventListener('click', (ev) => {
+        // Bind dei due toggle: ciascuno aggiunge .hide-<target> al proprio
+        // .store-details quando è "spento". Ogni toggle agisce SOLO sul
+        // sottogruppo corrispondente (bianco o rosso).
+        sum.querySelectorAll('.subgroup-toggle-btn').forEach(btn => {
+          btn.addEventListener('click', (ev) => {
             ev.preventDefault();
             ev.stopPropagation(); // non far toggle del <details>
-            const visible = toggleBtn.getAttribute('aria-pressed') !== 'false';
+            const target = btn.dataset.target; // 'bianco' | 'rosso'
+            const visible = btn.getAttribute('aria-pressed') !== 'false';
             const nextVisible = !visible;
-            toggleBtn.setAttribute('aria-pressed', String(nextVisible));
-            d.classList.toggle('hide-type', !nextVisible);
+            btn.setAttribute('aria-pressed', String(nextVisible));
+            d.classList.toggle('hide-' + target, !nextVisible);
           });
-        }
+        });
 
         const content = document.createElement('div');
         content.className = 'store-content list';
