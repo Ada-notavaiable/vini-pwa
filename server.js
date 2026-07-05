@@ -496,9 +496,12 @@ app.get('/api/stats', (req, res) => {
   // (sono in genere centinaia, non migliaia) e poi li partiziono in memoria. Restituisce un array
   // di negozi con conteggi per ciascun tipo e gli elenchi completi dei vini divisi per tipo,
   // così la pagina stats può renderizzare un blocco espandibile senza round-trip aggiuntivi.
+  // Selezione completa dei campi vino necessari alla pagina stats: la lista "vini per negozio"
+  // ora mostra le stesse wine-card della home (con foto, tipo, nota), quindi servono anche
+  // photo_path, wine_type, note e created_at completo.
   const allWines = getAll(
-    `SELECT w.id, w.name, w.store_id, w.rating, w.price, w.wine_type,
-            substr(w.created_at, 1, 10) AS date
+    `SELECT w.id, w.name, w.store_id, w.rating, w.note, w.photo_path, w.wine_type, w.price,
+            w.created_at
        FROM wines w
        ORDER BY w.created_at DESC`
   );
@@ -531,7 +534,16 @@ app.get('/api/stats', (req, res) => {
     if (slot === 'bianco') s.count_bianco++;
     else if (slot === 'rosso') s.count_rosso++;
     else s.count_null++;
-    s.wines[slot].push({ id: w.id, name: w.name, rating: w.rating, price: w.price, date: w.date });
+    s.wines[slot].push({
+      id: w.id,
+      name: w.name,
+      rating: w.rating,
+      price: w.price,
+      note: w.note,
+      photo_path: w.photo_path,
+      wine_type: w.wine_type,
+      created_at: w.created_at,
+    });
   }
   const byStore = Array.from(byStoreMap.values()).map(s => {
     const o = {
