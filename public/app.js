@@ -395,6 +395,58 @@
       .catch((e) => toast('Errore import: ' + e.message, 'error'));
   });
 
+  // ---------- backup completo (ZIP) ----------
+  // Il bottone è un <a href="/api/backup">; il browser gestisce il download da solo.
+  // Aggiungo solo un toast per dare feedback durante la creazione dello ZIP lato server.
+  const backupBtn = $('backup-zip-btn');
+  if (backupBtn) {
+    backupBtn.addEventListener('click', () => {
+      toast('Preparazione backup in corso…');
+      // Il <a> vera navigazione parte lo stesso: l'utente scaricherà il file.
+      // Il toast si auto-rimuove dopo 3s, normalmente il download è già partito.
+    });
+  }
+
+  // ---------- ripristino backup ZIP ----------
+  const restoreBtn = $('restore-zip-btn');
+  const backupInput = $('backup-input');
+  if (restoreBtn && backupInput) {
+    restoreBtn.addEventListener('click', () => {
+      openConfirmModal(
+        'Ripristina backup',
+        'Tutti i vini, negozi e foto ATTUALI verranno cancellati e sostituiti con quelli del file ZIP. L\u2019operazione è irreversibile. Continuare?',
+        () => backupInput.click(),
+        restoreBtn
+      );
+    });
+    backupInput.addEventListener('change', async () => {
+      const f = backupInput.files && backupInput.files[0];
+      backupInput.value = ''; // permette di re-importare lo stesso file
+      if (!f) return;
+      const fd = new FormData();
+      fd.append('backup', f, f.name);
+      toast('Ripristino in corso…');
+      restoreBtn.disabled = true;
+      try {
+        const r = await fetch('/api/restore', { method: 'POST', body: fd });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
+        const parts = [`Ripristinati ${body.wines || 0} vini`];
+        if (body.photos_written) parts.push(`${body.photos_written} foto`);
+        if (body.errors) parts.push(`${body.errors} errori`);
+        if (body.photos_skipped) parts.push(`${body.photos_skipped} foto scartate`);
+        toast(parts.join(' · '), body.errors ? 'error' : 'success');
+        await loadStores('wine-store');
+        loadWines();
+        toast('Fai un hard-refresh (Ctrl+Shift+R) per vedere tutte le foto', 'success');
+      } catch (e) {
+        toast('Errore ripristino: ' + e.message, 'error');
+      } finally {
+        restoreBtn.disabled = false;
+      }
+    });
+  }
+
   // ---------- wiring modal di conferma (elimina vino) ----------
   $('confirm-modal-cancel').addEventListener('click', closeConfirmModal);
   $('confirm-modal-ok').addEventListener('click', async () => {

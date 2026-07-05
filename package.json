@@ -8,6 +8,7 @@
     "dev": "node --max-old-space-size=256 server.js"
   },
   "dependencies": {
+    "adm-zip": "^0.5.18",
     "cors": "^2.8.5",
     "exif-parser": "^0.1.12",
     "express": "^4.19.2",

@@ -125,6 +125,10 @@
       <a href="/api/export/wines.csv" class="btn btn-secondary">⬇️ Esporta CSV</a>
       <input type="file" id="csv-input" accept=".csv,text/csv" hidden />
       <button type="button" class="btn btn-secondary" id="import-csv-btn">📥 Importa CSV</button>
+      <span style="flex-basis:100%;height:0;"></span>
+      <a href="/api/backup" class="btn btn-secondary" id="backup-zip-btn" title="Scarica backup completo (CSV + foto) in un unico ZIP">⬇️ Backup completo</a>
+      <input type="file" id="backup-input" accept=".zip,application/zip" hidden />
+      <button type="button" class="btn btn-secondary" id="restore-zip-btn" title="Ripristina da un backup ZIP (sostituisce tutti i dati esistenti)">📥 Ripristina backup</button>
       <button type="button" class="btn btn-secondary" id="refresh-btn">🔄 Aggiorna</button>
       <button type="button" class="btn btn-secondary" id="update-app-btn" title="Scarica l'ultima versione dell'app">🆕 Aggiorna app</button>
     </div>

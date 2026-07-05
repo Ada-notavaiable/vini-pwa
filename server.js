@@ -9,6 +9,7 @@ const multer = require('multer');
 const initSqlJs = require('sql.js');
 const Jimp = require('jimp');
 const ExifParser = require('exif-parser');
+const AdmZip = require('adm-zip');
 
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'vini.db');
@@ -734,6 +735,238 @@ app.get('/api/export/wines.csv', (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="wines.csv"');
   res.send('\ufeff' + lines.join('\n'));
+});
+
+// ---------- API: backup completo (ZIP: wines.csv + photos/ + MANIFEST.json) ----------
+// Restituisce un archivio ZIP unico che contiene TUTTO lo stato utente salvabile:
+//   wines.csv             — stesso formato di /api/export/wines.csv (metadati testuali)
+//   photos/&lt;filename&gt;     — una copia di ogni file in PHOTO_DIR (foto ridimensionate 1024px)
+//   MANIFEST.json         — { schema_version, generated_at, wine_count, photo_count }
+// Limiti pratici: bufferizzato interamente in memoria (Zip.toBuffer) → per centinaia di vini
+// con foto è tipicamente 5-50 MB, ben sotto i 256 MB di mem_limit del container.
+app.get('/api/backup', async (req, res) => {
+  try {
+    const rows = getAll(
+      `SELECT w.id, w.name, w.wine_type, w.price, s.name AS store, w.rating, w.note, w.photo_path, w.created_at
+         FROM wines w LEFT JOIN stores s ON s.id = w.store_id
+         ORDER BY w.created_at ASC`
+    );
+    const lines = ['id;name;type;price;store;rating;note;photo;created_at'];
+    for (const r of rows) {
+      const priceStr = r.price != null ? Number(r.price).toFixed(2).replace('.', ',') : '';
+      lines.push([r.id, r.name, r.wine_type || '', priceStr, r.store || '', r.rating, r.note || '', r.photo_path || '', r.created_at].map(csvEscape).join(';'));
+    }
+    const csvText = '\ufeff' + lines.join('\n');
+
+    let photoCount = 0;
+    const photoFiles = [];
+    if (fs.existsSync(PHOTO_DIR)) {
+      for (const f of fs.readdirSync(PHOTO_DIR)) {
+        const full = path.join(PHOTO_DIR, f);
+        try {
+          if (fs.statSync(full).isFile()) { photoFiles.push(full); photoCount++; }
+        } catch (_) { /* race o permessi → ignora */ }
+      }
+    }
+
+    const manifest = {
+      schema_version: 1,
+      generated_at: new Date().toISOString(),
+      app: 'vini-pwa',
+      wine_count: rows.length,
+      photo_count: photoCount,
+    };
+
+    const zip = new AdmZip();
+    zip.addFile('MANIFEST.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'));
+    zip.addFile('wines.csv', Buffer.from(csvText, 'utf8'));
+    for (const fullPath of photoFiles) {
+      // addLocalFile(preferDot:true)␤place at "photos/&lt;basename&gt;". Niente path traversal: il basename
+      // proviene da fs.readdirSync della nostra directory di lavoro.
+      zip.addLocalFile(fullPath, 'photos');
+    }
+    const buf = zip.toBuffer();
+
+    const yyyymmdd = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="vini-backup-${yyyymmdd}.zip"`);
+    res.setHeader('X-Wine-Count', String(rows.length));
+    res.setHeader('X-Photo-Count', String(photoCount));
+    res.send(buf);
+  } catch (e) {
+    console.error('[backup]', e);
+    res.status(500).json({ error: 'backup fallito: ' + (e.message || e) });
+  }
+});
+
+// ---------- API: ripristino da backup ZIP (wipe + reimport in transazione) ----------
+// WIPE SEMANTICS: questa route CANCELLA wines + stores + foto esistenti e poi inserisce
+// tutto quello che c'è nel backup. Confermato dal client con un confirm-modal. In caso di
+// errore a metà strade, il DB viene ripristinato allo stato vuoto (rollback SQLite).
+// Limite upload separato a 500 MB perché un backup con molte foto può essere grosso; il file
+// temporaneo viene scritto su OS tmpdir (vinipwa-uploads, configurato sotto), poi unlinked.
+const restoreUpload = multer({
+  dest: path.join(require('os').tmpdir(), 'vinipwa-uploads'),
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB
+});
+
+app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'file ZIP mancante' });
+  let zip;
+  try {
+    zip = new AdmZip(req.file.path);
+  } catch (e) {
+    try { fs.unlinkSync(req.file.path); } catch (_) {}
+    return res.status(400).json({ error: 'file ZIP non valido: ' + (e.message || e) });
+  }
+  try { fs.unlinkSync(req.file.path); } catch (_) { /* best-effort cleanup */ }
+
+  // Validazione: MANIFEST.json deve esistere e avere schema_version=1.
+  const manifestEntry = zip.getEntry('MANIFEST.json');
+  if (!manifestEntry) return res.status(400).json({ error: 'MANIFEST.json mancante (non è un backup valido)' });
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestEntry.getData().toString('utf8'));
+  } catch (e) {
+    return res.status(400).json({ error: 'MANIFEST.json non parsabile' });
+  }
+  if (Number(manifest.schema_version) !== 1) {
+    return res.status(400).json({ error: 'schema_version non supportato: ' + manifest.schema_version });
+  }
+
+  const csvEntry = zip.getEntry('wines.csv');
+  if (!csvEntry) return res.status(400).json({ error: 'wines.csv mancante nel backup' });
+  const csvText = csvEntry.getData().toString('utf8');
+  const rows = parseCsv(csvText).filter(r => r.some(c => (c || '').trim() !== ''));
+  if (!rows.length) return res.status(400).json({ error: 'wines.csv vuoto' });
+
+  const header = (rows[0] || []).map(h => (h || '').toLowerCase().trim());
+  const idx = {
+    id: header.indexOf('id'),
+    name: header.indexOf('name'),
+    type: header.indexOf('type'),
+    price: header.indexOf('price'),
+    store: header.indexOf('store'),
+    rating: header.indexOf('rating'),
+    note: header.indexOf('note'),
+    photo: header.indexOf('photo'),
+    created_at: header.indexOf('created_at'),
+  };
+  if (idx.name < 0 || idx.rating < 0 || idx.id < 0) {
+    return res.status(400).json({ error: 'colonne "id", "name" o "rating" mancanti nell\'header' });
+  }
+
+  // WIPE + RESTORE in transazione SQLite (BEGIN/COMMIT/ROLLBACK).
+  // Se qualcosa fallisce a metà, ROLLBACK ripristina uno stato coerente (vuoto).
+  try {
+    await ensurePhotoDir();
+    db.run('BEGIN');
+
+    // 1. Svuota DB.
+    db.run('DELETE FROM wines');
+    db.run('DELETE FROM stores');
+
+    // 2. Svuota /photos (best-effort: ignora singoli file mancanti o locked).
+    if (fs.existsSync(PHOTO_DIR)) {
+      for (const f of fs.readdirSync(PHOTO_DIR)) {
+        try { fs.unlinkSync(path.join(PHOTO_DIR, f)); } catch (_) { /* ignore */ }
+      }
+    }
+
+    // 3. Ricostruisci stores case-insensitive, riusando la mappa all'interno della transazione.
+    const storesByName = new Map();
+    function getOrCreateStore(name) {
+      const key = String(name).toLowerCase().trim();
+      if (!key) return null;
+      if (storesByName.has(key)) return storesByName.get(key);
+      const id = runSql(`INSERT INTO stores (name) VALUES (?)`, [name]);
+      storesByName.set(key, Number(id));
+      return Number(id);
+    }
+    const TYPE_ALIASES = new Map([
+      ['bianco', 'bianco'], ['b', 'bianco'], ['white', 'bianco'],
+      ['rosso', 'rosso'],   ['r', 'rosso'],  ['red', 'rosso'],
+    ]);
+    function parseType(raw) {
+      if (raw == null) return null;
+      const s = String(raw).trim().toLowerCase();
+      return TYPE_ALIASES.get(s) || null;
+    }
+    function parsePrice(raw) {
+      if (raw == null || raw === '') return null;
+      const n = Number(String(raw).trim().replace(',', '.'));
+      if (!Number.isFinite(n) || n < 0) return null;
+      return Math.round(n * 100) / 100;
+    }
+
+    let restored = 0, skippedPhotoMissing = 0, errors = 0;
+    const photoSet = new Set();  // tracciamo quali photo_path sono effettivamente referenziati
+
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i] || [];
+      const id = parseInt((row[idx.id] || '').trim(), 10);
+      if (!Number.isInteger(id) || id < 1) { errors++; continue; }
+      const name = (row[idx.name] || '').trim();
+      const rating = parseInt((row[idx.rating] || '').trim(), 10);
+      if (!name) { errors++; continue; }
+      if (!Number.isInteger(rating) || rating < 1 || rating > 10) { errors++; continue; }
+      const storeId = (idx.store >= 0 && row[idx.store]) ? getOrCreateStore(String(row[idx.store]).trim()) : null;
+      const note = (idx.note >= 0 && row[idx.note] != null) ? String(row[idx.note]) : null;
+      const wineType = parseType(idx.type >= 0 ? row[idx.type] : null);
+      const price = parsePrice(idx.price >= 0 ? row[idx.price] : null);
+      const createdAt = (idx.created_at >= 0 && row[idx.created_at]) ? String(row[idx.created_at]).trim() : null;
+      const photoPath = (idx.photo >= 0 && row[idx.photo]) ? String(row[idx.photo]).trim() : null;
+
+      try {
+        runSql(
+          `INSERT INTO wines (id, name, store_id, rating, note, photo_path, wine_type, price, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id, name, storeId, rating, note, photoPath || null, wineType, price, createdAt]
+        );
+        restored++;
+        if (photoPath) photoSet.add(photoPath);
+      } catch (e) {
+        errors++;
+      }
+    }
+
+    // 4. Scrivi le foto: solo quelle effettivamente referenziate dal CSV (evita di
+    //    spargere file orfani che farebbero solo peso). Estrai ogni entries/photos/<file>.
+    let photoWritten = 0, photoSkipped = 0;
+    const photoEntries = zip.getEntries().filter(e =>
+      e.entryName.startsWith('photos/') &&
+      !e.isDirectory &&
+      !e.entryName.includes('..')  // difesa contro path traversal improbabile in un backup locale
+    );
+    for (const e of photoEntries) {
+      const basename = path.basename(e.entryName);
+      // Mantien solo file "semplici" (no sottocartelle annidate).
+      if (!basename || basename.indexOf('/') !== -1 || basename.indexOf('\\') !== -1) { photoSkipped++; continue; }
+      if (!photoSet.has(basename)) { photoSkipped++; continue; } // foto orfana
+      try {
+        const out = path.join(PHOTO_DIR, basename);
+        fs.writeFileSync(out, e.getData());
+        photoWritten++;
+      } catch (err) {
+        photoSkipped++;
+      }
+    }
+
+    db.run('COMMIT');
+    saveDB(true);
+
+    res.json({
+      ok: true,
+      wines: restored,
+      errors: errors,
+      photos_written: photoWritten,
+      photos_skipped: photoSkipped,
+    });
+  } catch (e) {
+    try { db.run('ROLLBACK'); } catch (_) { /* ignore */ }
+    console.error('[restore]', e);
+    res.status(500).json({ error: 'restore fallito a metà: ' + (e.message || e) });
+  }
 });
 
 // SPA fallback: tutte le rotte non-API/non-photo vanno a index.html
