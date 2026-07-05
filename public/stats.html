@@ -42,20 +42,8 @@
       </div>
     </section>
 
-    <div class="stats-toolbar" role="toolbar" aria-label="Filtra tipo di vino">
-      <button type="button" class="toggle-btn" id="toggle-bianchi" aria-pressed="true" title="Mostra/nascondi i vini bianchi">
-        <span class="eye-show" aria-hidden="true">👁️</span>
-        <span class="eye-hide" aria-hidden="true">🙈</span>
-        <span class="lbl">🍾 Bianchi</span>
-      </button>
-      <button type="button" class="toggle-btn" id="toggle-rossi" aria-pressed="true" title="Mostra/nascondi i vini rossi">
-        <span class="eye-show" aria-hidden="true">👁️</span>
-        <span class="eye-hide" aria-hidden="true">🙈</span>
-        <span class="lbl">🍷 Rossi</span>
-      </button>
-      <span class="help-text" style="margin: 0; align-self: center;">
-        Tocca un negozio per espanderlo · un vino per i dettagli.
-      </span>
+    <div class="help-text" style="margin: 0 0 12px 0;">
+      Tocca un negozio per espanderlo · un vino per i dettagli. 👁️ accanto al nome = mostra/nascondi 🍾 Bianchi e 🍷 Rossi di quel negozio.
     </div>
 
     <div class="section-title">🏪 Vini per negozio</div>
@@ -70,8 +58,17 @@
   <div class="modal-backdrop" id="wine-modal" aria-hidden="true">
     <div class="modal wine-detail" role="dialog" aria-modal="true" aria-labelledby="wine-modal-title">
       <button type="button" class="modal-close" id="wine-modal-close" aria-label="Chiudi">✕</button>
-      <div class="wine-detail-photo" id="wine-detail-photo"></div>
+
+      <!-- Foto piccola in alto, adattata (no crop). Click → lightbox full-size. -->
+      <div class="wine-detail-photo">
+        <button type="button" class="thumb-btn" id="wd-photo-btn" hidden title="Clicca per vedere la foto più grande">
+          <img id="wd-photo-img" alt="" loading="lazy" />
+        </button>
+        <div class="no-photo" id="wd-no-photo" hidden>🍷</div>
+      </div>
+
       <h2 id="wine-modal-title" class="wine-detail-title"></h2>
+
       <div class="wine-detail-meta">
         <div class="wm-row"><span class="wm-lbl">🏪 Negozio</span><span class="wm-val" id="wd-store"></span></div>
         <div class="wm-row"><span class="wm-lbl">Tipo</span><span class="wm-val" id="wd-type"></span></div>
@@ -82,10 +79,19 @@
           <span class="wm-lbl">📝 Nota</span><span class="wm-val" id="wd-note"></span>
         </div>
       </div>
+
       <div class="modal-actions">
         <button type="button" class="btn btn-secondary" id="wine-modal-close-2">Chiudi</button>
         <button type="button" class="btn btn-danger" id="wine-modal-delete">🗑️ Elimina</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Lightbox: zoom full-size sulla foto del vino -->
+  <div class="modal-backdrop image-lightbox-backdrop" id="image-lightbox" aria-hidden="true">
+    <div class="image-lightbox" role="dialog" aria-modal="true" aria-label="Immagine ingrandita">
+      <button type="button" class="image-lightbox-close" id="image-lightbox-close" aria-label="Chiudi">✕</button>
+      <img id="image-lightbox-img" src="" alt="" />
     </div>
   </div>
 
@@ -117,20 +123,17 @@
         } catch (_) { return '€' + n.toFixed(2); }
       }
 
-      function renderStars(rating) {
-        const max = 10;
-        let html = '<div class="stars stars-readonly compact" aria-label="voto ' + rating + ' su 10">';
-        for (let i = max; i >= 1; i--) {
-          const checked = i <= Number(rating) ? ' checked' : '';
-          html += '<input type="radio" disabled' + checked + '><label>★</label>';
+      // Stelle piene N + numero N/10 (senza stelle vuote). rating 1..10 atteso.
+      function ratingPillHtml(rating) {
+        const r = Number(rating);
+        if (!Number.isInteger(r) || r < 1 || r > 10) {
+          return '<span class="rating-pill empty"><span class="r-num">—</span></span>';
         }
-        html += '</div>';
-        return html;
-      }
-
-      function starsInner(rating) {
-        const m = renderStars(rating).match(/<div class="stars stars-readonly compact"[^>]*>([\s\S]*?)<\/div>/);
-        return m ? m[1] : '';
+        const stars = '★'.repeat(r);
+        return '<span class="rating-pill">' +
+                 '<span class="r-stars">' + stars + '</span>' +
+                 '<span class="r-num">' + r + '/10</span>' +
+               '</span>';
       }
 
       function wineTypeBadgeHtml(wt) {
@@ -139,31 +142,12 @@
         return '<span class="wine-type-badge nd">— N/D —</span>';
       }
 
-      // ---------- toggle per tipo: nasconde le liste Bianchi / Rossi ----------
-
-      function bindToggle(btnId, bodyClass) {
-        const btn = $(btnId);
-        if (!btn) return;
-        btn.addEventListener('click', () => {
-          // aria-pressed="true"  → la lista È visibile (stato attivo).
-          // aria-pressed="false" → la lista È nascosta.
-          const currentlyVisible = btn.getAttribute('aria-pressed') !== 'false';
-          const newVisible = !currentlyVisible;
-          btn.setAttribute('aria-pressed', String(newVisible));
-          document.body.classList.toggle(bodyClass, !newVisible);
-        });
-      }
-      bindToggle('toggle-bianchi', 'hide-bianchi');
-      bindToggle('toggle-rossi', 'hide-rossi');
-
-      // ---------- rendering: card vino (identica allo stile "attività recenti") ----------
+      // ---------- rendering: card vino ----------
 
       function createWineCard(w, storeName) {
         const card = document.createElement('div');
         card.className = 'wine-card';
         card.dataset.id = w.id;
-        // Stash del payload sulla card → la delega document-level può aprire il popup
-        // anche se la card è dentro un <details> con gestori di summary nativi.
         card.__wineData = { wine: w, storeName: storeName };
 
         const thumbH = w.photo_path
@@ -184,24 +168,35 @@
           </div>
         `;
         card.querySelector('.name').textContent = w.name;
-        const storeText = storeName ? storeName : '— senza negozio —';
         const r = Number(w.rating);
+        const storeText = storeName ? storeName : '— senza negozio —';
         card.querySelector('.store').textContent = storeText + (Number.isInteger(r) ? ' · voto ' + r : '');
         if (w.note) card.querySelector('.note-preview').textContent = w.note;
         if (w.price != null && Number.isFinite(Number(w.price))) {
           card.querySelector('.price').textContent = fmtPriceStats(w.price);
         }
         card.querySelector('.date').textContent = (w.created_at || '').slice(0, 10);
-        card.querySelector('.stars').innerHTML = starsInner(r);
+        card.querySelector('.stars').innerHTML = starsInner10(r);
         return card;
       }
 
-      // ---------- rendering: gruppo negozio con sottogruppi per tipo ----------
+      // 10 stelle compatte (5 piene + 5 grigie) usate SOLO nelle card della lista.
+      // Il popup invece usa ratingPillHtml() per mostrare solo le stelle piene + numero.
+      function starsInner10(rating) {
+        const r = Number(rating) || 0;
+        let html = '';
+        for (let i = 10; i >= 1; i--) {
+          html += '<input type="radio" disabled' + (i <= r ? ' checked' : '') + '><label>★</label>';
+        }
+        return html;
+      }
+
+      // ---------- rendering: gruppo negozio ----------
 
       function renderStoreGroup(s) {
         const d = document.createElement('details');
         d.className = 'store-details';
-        d.open = true; // aperti di default: subito visibili masse di dati
+        d.open = true;
 
         const sum = document.createElement('summary');
         const avg = s.avg_rating != null ? ' · voto medio ' + Number(s.avg_rating).toFixed(1) : '';
@@ -210,12 +205,30 @@
         if (s.count_rosso)  countBits.push('<span class="count-tag rosso">🍷 ' + s.count_rosso + '</span>');
         if (s.count_null)   countBits.push('<span class="count-tag null">N/D ' + s.count_null + '</span>');
         sum.innerHTML =
-          '<div><strong>' + escapeHtml(s.name) + '</strong>' +
+          '<div class="store-title-cell"><strong>' + escapeHtml(s.name) + '</strong>' +
           '<span class="help-text" style="margin-left:6px;">' +
           s.count + ' vini' + avg +
           '</span></div>' +
-          '<div class="store-counts">' + countBits.join('') + '</div>';
+          '<div class="store-counts">' + countBits.join('') + '</div>' +
+          '<button type="button" class="store-toggle-btn" aria-pressed="true" title="Mostra/nascondi 🍾 Bianchi e 🍷 Rossi di questo negozio">' +
+            '<span class="eye-show" aria-hidden="true">👁️</span>' +
+            '<span class="eye-hide" aria-hidden="true">🙈</span>' +
+          '</button>';
         d.appendChild(sum);
+
+        // Bind del toggle: aggiunge .hide-type al parent .store-details quando è "spento".
+        // "Senza tipo" resta sempre visibile.
+        const toggleBtn = sum.querySelector('.store-toggle-btn');
+        if (toggleBtn) {
+          toggleBtn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation(); // non far toggle del <details>
+            const visible = toggleBtn.getAttribute('aria-pressed') !== 'false';
+            const nextVisible = !visible;
+            toggleBtn.setAttribute('aria-pressed', String(nextVisible));
+            d.classList.toggle('hide-type', !nextVisible);
+          });
+        }
 
         const content = document.createElement('div');
         content.className = 'store-content list';
@@ -237,16 +250,16 @@
           }
           content.appendChild(grp);
         }
-        addGroup('bianco', '🍾 Bianchi',   (s.wines && s.wines.bianco)    || []);
-        addGroup('rosso',  '🍷 Rossi',     (s.wines && s.wines.rosso)     || []);
-        addGroup('null',   'Senza tipo',   (s.wines && s.wines.null_type) || []);
+        addGroup('bianco', '🍾 Bianchi',  (s.wines && s.wines.bianco)    || []);
+        addGroup('rosso',  '🍷 Rossi',    (s.wines && s.wines.rosso)     || []);
+        addGroup('null',   'Senza tipo',  (s.wines && s.wines.null_type) || []);
         d.appendChild(content);
         return d;
       }
 
       // ---------- modal: dettaglio vino ----------
 
-      let currentWineModal = null;     // {wine, storeName}
+      let currentWineModal = null;
       let lastWineModalTrigger = null;
 
       function openWineModal(w, storeName, trigger) {
@@ -259,29 +272,30 @@
         $('wd-price').textContent = (w.price != null && Number.isFinite(Number(w.price)))
           ? fmtPriceStats(w.price)
           : '—';
-        $('wd-stars').innerHTML = starsInner(Number(w.rating) || 0);
+        $('wd-stars').innerHTML = ratingPillHtml(w.rating);
         $('wd-date').textContent = (w.created_at || '').slice(0, 10) || '—';
 
         if (w.note && String(w.note).trim() !== '') {
           $('wd-note').textContent = w.note;
           $('wd-note-row').hidden = false;
         } else {
-          $('wd-note-row').hidden = true;
           $('wd-note').textContent = '';
+          $('wd-note-row').hidden = true;
         }
 
-        const photoEl = $('wine-detail-photo');
-        photoEl.innerHTML = '';
+        // Foto piccola (thumbnail) — mostrata solo se photo_path presente.
+        const photoBtn = $('wd-photo-btn');
+        const photoImg = $('wd-photo-img');
+        const noPhoto = $('wd-no-photo');
         if (w.photo_path) {
-          const img = document.createElement('img');
-          img.src = '/photos/' + encodeURIComponent(w.photo_path);
-          img.alt = w.name || '';
-          img.loading = 'lazy';
-          photoEl.appendChild(img);
-          photoEl.classList.remove('no-photo');
+          photoImg.src = '/photos/' + encodeURIComponent(w.photo_path);
+          photoImg.alt = w.name || '';
+          photoBtn.hidden = false;
+          noPhoto.hidden = true;
         } else {
-          photoEl.textContent = '🍷';
-          photoEl.classList.add('no-photo');
+          photoImg.removeAttribute('src');
+          photoBtn.hidden = true;
+          noPhoto.hidden = false;
         }
 
         $('wine-modal').classList.add('open');
@@ -306,8 +320,47 @@
       $('wine-modal').addEventListener('click', (ev) => {
         if (ev.target === $('wine-modal')) closeWineModal();
       });
-      document.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Escape' && $('wine-modal').classList.contains('open')) closeWineModal();
+
+      // ---------- lightbox foto (click sulla thumbnail dentro al popup) ----------
+
+      let lastImgTrigger = null;
+
+      function openImageLightbox(src, alt, trigger) {
+        const lb = $('image-lightbox');
+        const img = $('image-lightbox-img');
+        lastImgTrigger = trigger || null;
+        img.src = src;
+        img.alt = alt || '';
+        lb.classList.add('open');
+        lb.setAttribute('aria-hidden', 'false');
+        document.body.style.overflow = 'hidden';
+        try { $('image-lightbox-close').focus({ preventScroll: true }); } catch (_) { /* ignore */ }
+      }
+
+      function closeImageLightbox() {
+        const lb = $('image-lightbox');
+        const img = $('image-lightbox-img');
+        lb.classList.remove('open');
+        lb.setAttribute('aria-hidden', 'true');
+        // non resettare src subito: fade-out. Teniamolo breve.
+        setTimeout(() => { try { img.src = ''; img.alt = ''; } catch (_) {} }, 200);
+        document.body.style.overflow = '';
+        if (lastImgTrigger && typeof lastImgTrigger.focus === 'function') {
+          try { lastImgTrigger.focus({ preventScroll: true }); } catch (_) { /* ignore */ }
+        }
+        lastImgTrigger = null;
+      }
+
+      $('image-lightbox-close').addEventListener('click', closeImageLightbox);
+      $('image-lightbox').addEventListener('click', (ev) => {
+        if (ev.target === $('image-lightbox')) closeImageLightbox();
+      });
+
+      // Click sulla thumbnail dentro al popup → apre il lightbox full-size.
+      $('wd-photo-btn').addEventListener('click', () => {
+        const w = currentWineModal && currentWineModal.wine;
+        if (!w || !w.photo_path) return;
+        openImageLightbox('/photos/' + encodeURIComponent(w.photo_path), w.name, $('wd-photo-btn'));
       });
 
       // ---------- delega click: qualsiasi wine-card apre il popup ----------
@@ -319,6 +372,15 @@
         if (!data) return;
         ev.preventDefault();
         openWineModal(data.wine, data.storeName, card);
+      });
+
+      // ---------- ESC globale per chiudere il modal in primo piano ----------
+
+      document.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Escape') return;
+        // L'immagine-lightbox sta sopra al wine-modal → chiudila prima.
+        if ($('image-lightbox').classList.contains('open')) { closeImageLightbox(); return; }
+        if ($('wine-modal').classList.contains('open'))    { closeWineModal();    return; }
       });
 
       // ---------- elimina vino dal popup ----------
@@ -365,7 +427,6 @@
         }
       }
 
-      // Marca la tab attiva coerente con il path corrente (utile anche qui).
       const here = location.pathname;
       document.querySelectorAll('.tab').forEach(t => {
         if (t.getAttribute('href') === here) t.classList.add('active');

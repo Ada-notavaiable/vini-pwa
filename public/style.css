@@ -654,7 +654,7 @@ textarea { resize: vertical; min-height: 60px; }
 
 .store-details > summary {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
   align-items: center;
   padding: 8px 12px;
   cursor: pointer;
@@ -835,57 +835,54 @@ textarea { resize: vertical; min-height: 60px; }
   z-index: 1;
 }
 
-/* ---------- stats: toolbar toggle per tipo (Bianchi / Rossi) ---------- */
+/* ---------- stats: toggle per-store (mostra/nascondi 🍾 Bianchi + 🍷 Rossi di UN negozio) ---------- */
 
-.stats-toolbar {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: center;
-  margin: 0 0 12px 0;
-  padding: 10px 12px;
-  background: var(--surface);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+.store-details > summary > .store-title-cell {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.toggle-btn {
+.store-toggle-btn {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 999px;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
   background: var(--surface-soft);
   border: 1px solid var(--border);
   color: var(--text);
-  font: inherit;
-  font-size: 0.86rem;
-  font-weight: 600;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  font-size: 1rem;
+  line-height: 1;
   transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s, transform 0.05s;
-  user-select: none;
 }
-.toggle-btn:hover { background: #e8e0d3; }
-.toggle-btn:active { transform: translateY(1px); }
-.toggle-btn:focus-visible {
+.store-toggle-btn:hover { background: #e8e0d3; }
+.store-toggle-btn:active { transform: scale(0.94); }
+.store-toggle-btn:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
 }
-.toggle-btn .eye-show { display: inline; }
-.toggle-btn .eye-hide { display: none; }
-.toggle-btn[aria-pressed="false"] {
+.store-toggle-btn .eye-show { display: inline; }
+.store-toggle-btn .eye-hide  { display: none; }
+.store-toggle-btn[aria-pressed="false"] {
   background: var(--surface);
   color: var(--text-soft);
   border-style: dashed;
-  opacity: 0.75;
+  opacity: 0.7;
 }
-.toggle-btn[aria-pressed="false"] .eye-show { display: none; }
-.toggle-btn[aria-pressed="false"] .eye-hide { display: inline; }
+.store-toggle-btn[aria-pressed="false"] .eye-show { display: none; }
+.store-toggle-btn[aria-pressed="false"] .eye-hide  { display: inline; }
 
-body.hide-bianchi .wine-subgroup.bianco,
-body.hide-rossi  .wine-subgroup.rosso { display: none; }
-body.hide-bianchi .count-tag.bianco,
-body.hide-rossi  .count-tag.rosso { opacity: 0.45; text-decoration: line-through; }
+/* Scope PER-store: nasconde solo le sottoliste di QUEL negozio (.hide-type).
+   "Senza tipo" resta sempre visibile. */
+.store-details.hide-type .wine-subgroup.bianco,
+.store-details.hide-type .wine-subgroup.rosso { display: none; }
+.store-details.hide-type .count-tag.bianco,
+.store-details.hide-type .count-tag.rosso { opacity: 0.45; text-decoration: line-through; }
 
 /* ---------- wine detail modal (popup stats) ---------- */
 
@@ -922,25 +919,47 @@ body.hide-rossi  .count-tag.rosso { opacity: 0.45; text-decoration: line-through
   outline-offset: 2px;
 }
 
+/* Foto piccola nel popup, ADATTATA (object-fit: contain → no crop).
+   Click sul bottone .thumb-btn apre il lightbox full-size. */
 .wine-detail-photo {
-  width: 100%;
-  aspect-ratio: 4 / 3;
   background: var(--surface-soft);
+  padding: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 3rem;
-  color: var(--muted);
+  min-height: 80px;
+  max-height: 220px;
   overflow: hidden;
 }
-.wine-detail-photo img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-  background: #000;
+.wine-detail-photo.no-photo { font-size: 3rem; }
+.wine-detail-photo .thumb-btn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: zoom-in;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: 196px;
+  line-height: 0;
+  -webkit-tap-highlight-color: transparent;
 }
-.wine-detail-photo.no-photo { font-size: 3.5rem; }
+.wine-detail-photo .thumb-btn:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+.wine-detail-photo .thumb-btn img {
+  display: block;
+  max-width: 100%;
+  max-height: 196px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  background: #14100e;
+  border-radius: var(--radius-sm);
+}
 
 .wine-detail-title {
   font-size: 1.25rem;
@@ -1002,3 +1021,30 @@ body.hide-rossi  .count-tag.rosso { opacity: 0.45; text-decoration: line-through
   color: var(--text-soft);
   border-color: var(--border);
 }
+
+/* ---------- rating pill (popup stats): N stelle piene + "N/10", niente stelle vuote ---------- */
+
+.rating-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  font-weight: 700;
+  color: var(--accent);
+  user-select: none;
+}
+.rating-pill .r-stars {
+  letter-spacing: 0;
+  font-size: 1.05rem;
+  color: var(--accent);
+}
+.rating-pill .r-num {
+  font-size: 0.86rem;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+.rating-pill.empty .r-num { color: var(--muted); }
