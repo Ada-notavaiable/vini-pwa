@@ -67,6 +67,16 @@
   let pendingPhotoUrl = null;      // ObjectURL associato al File (per revocarlo)
   let deferredInstallPrompt = null;
 
+  // Soglie per il resize lato client PRIMA dell'upload.
+  // Il server accetta fino a 8 MB (multer limits.fileSize) ma su Orange Pi con
+  // mem_limit 256 MB e --max-old-space-size=128, Jimp che decodifica in V8 rischia
+  // OOM e/o timeout del reverse proxy davanti al container su foto > ~1600 px lato
+  // lungo. Per evitare OOM/502 ridimensioniamo sul dispositivo a max 1600 px JPEG
+  // qualità 85 quando l'immagine è > 1600 px OPPURE > 1.2 MB.
+  const PHOTO_CLIENT_MAX_DIM = 1600;
+  const PHOTO_CLIENT_JPEG_QUALITY = 0.85;
+  const PHOTO_CLIENT_SIZE_TRIGGER_BYTES = 1.2 * 1024 * 1024;
+
   // ---------- confirm modal (riusato da elimina vino ed eventuali altri) ----------
   let pendingConfirmCallback = null;
   let lastConfirmTrigger = null;
@@ -263,18 +273,117 @@
 
   // ---------- photo input (Scegli foto + Scatta foto) ----------
 
-  function bindPhotoFileInput(input) {
-    input.addEventListener('change', () => {
-      const f = input.files && input.files[0];
-      if (f) {
-        clearPendingPhoto();
-        pendingPhotoFile = f;
-        pendingPhotoUrl = URL.createObjectURL(f);
-        $('photo-preview-img').src = pendingPhotoUrl;
-        $('photo-preview').hidden = false;
+  // Helper: prova a decodificare la foto e a ricodificarla a JPEG max 1600 px q=85
+  // per alleggerire l'upload. Restituisce { file, resized, ... }.
+  //   - resized=false → mantieni il File originale (già piccolo o decode non riuscito)
+  //   - resized=true  → `file` è il File JPEG ricodificato
+  // Usa createImageBitmap (decodifica fuori dal DOM, rilascia il bitmap con .close())
+  // e l'opzione `imageOrientation: 'from-image'` per applicare EXIF Orientation
+  // automaticamente (Chrome 81+, Safari 13.1+, recenti Firefox). Se decode fallisce
+  // (es. HEIC su vecchi iOS, file corrotti), fallback al File originale e il server
+  // multer rifiuterà eventualmente con 413 leggibile.
+  async function maybeResizeImage(file) {
+    if (!file || !file.type || !file.type.startsWith('image/')) {
+      return { file, resized: false, reason: 'not-an-image' };
+    }
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch (e) {
+      console.warn('createImageBitmap fallita, uso file originale:', e);
+      return { file, resized: false, reason: 'decode-failed' };
+    }
+    try {
+      const w0 = bitmap.width, h0 = bitmap.height;
+      const longest = Math.max(w0, h0);
+      // Soglia: lascia com'è se sia dimensione sia peso sono sotto i limiti.
+      if (file.size <= PHOTO_CLIENT_SIZE_TRIGGER_BYTES && longest <= PHOTO_CLIENT_MAX_DIM) {
+        return { file, resized: false, reason: 'already-small', width: w0, height: h0 };
       }
-      // reset per permettere di scegliere lo stesso file di nuovo
+      const scale = longest > PHOTO_CLIENT_MAX_DIM ? PHOTO_CLIENT_MAX_DIM / longest : 1;
+      const w1 = Math.max(1, Math.round(w0 * scale));
+      const h1 = Math.max(1, Math.round(h0 * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w1;
+      canvas.height = h1;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        return { file, resized: false, reason: 'no-2d-context' };
+      }
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bitmap, 0, 0, w1, h1);
+
+      const blob = await new Promise((resolve, reject) => {
+        canvas.toBlob(
+          (b) => (b ? resolve(b) : reject(new Error('toBlob vuoto'))),
+          'image/jpeg',
+          PHOTO_CLIENT_JPEG_QUALITY
+        );
+      });
+
+      // Conserva il basename del File originale ma forza .jpg (lo accettiamo sempre
+      // e l'utente vede l'estensione coerente nel toast).
+      const baseName = (file.name || 'wine').replace(/\.[^.]+$/, '') || 'wine';
+      const newName = baseName + '.jpg';
+      const resizedFile = new File([blob], newName, {
+        type: 'image/jpeg',
+        lastModified: Date.now(),
+      });
+      return {
+        file: resizedFile,
+        resized: true,
+        width: w1,
+        height: h1,
+        fromBytes: file.size,
+        toBytes: blob.size,
+      };
+    } finally {
+      // Libera il bitmap decoded; senza questo la memoria GraphicsBuffer può restare
+      // allocata fino a GC, fastidioso su device mobili di fascia bassa.
+      if (bitmap && typeof bitmap.close === 'function') bitmap.close();
+    }
+  }
+
+  function fmtBytes(n) {
+    return n < 1024 * 1024
+      ? Math.round(n / 1024) + ' KB'
+      : (n / 1024 / 1024).toFixed(2) + ' MB';
+  }
+
+  function bindPhotoFileInput(input) {
+    input.addEventListener('change', async () => {
+      const f = input.files && input.files[0];
+      // reset del value PRIMA dell'await per permettere di riscegliere lo stesso file
       input.value = '';
+      if (!f) return;
+
+      clearPendingPhoto();
+      pendingPhotoFile = f;
+      pendingPhotoUrl = URL.createObjectURL(f);
+      $('photo-preview-img').src = pendingPhotoUrl;
+      $('photo-preview').hidden = false;
+
+      // Pre-resize sul dispositivo se la foto è "troppo grossa" (> 1600 px lato
+      // lungo OPPURE > 1.2 MB). Mostra subito l'originale, poi swap sulla versione
+      // ridotta con un toast informativo: così l'utente vede il prima/dopo e sa
+      // cosa è stato inviato al server.
+      try {
+        const result = await maybeResizeImage(f);
+        if (result.resized) {
+          URL.revokeObjectURL(pendingPhotoUrl);
+          pendingPhotoFile = result.file;
+          pendingPhotoUrl = URL.createObjectURL(result.file);
+          $('photo-preview-img').src = pendingPhotoUrl;
+          toast(
+            `📦 foto ridotta: ${fmtBytes(result.fromBytes)} → ${fmtBytes(result.toBytes)} (${result.width}×${result.height})`,
+            'success'
+          );
+        }
+      } catch (e) {
+        console.warn('resize foto lato client:', e);
+        // Fallback silenzioso: tieni l'originale. multer rifiuterà 413 se > 8 MB.
+      }
     });
   }
   bindPhotoFileInput($('photo-input-gallery'));
