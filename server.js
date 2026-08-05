@@ -34,6 +34,12 @@ async function initDb() {
     console.log(`[db] Creo nuovo DB in: ${DB_PATH}`);
   }
 
+  // Abilita i vincoli FK: senza questo `ON DELETE SET NULL` viene SILENZIOSAMENTE
+  // ignorato da SQLite (default = OFF), quindi cancellando un negozio le righe wines/
+  // spirits resterebbero orfane con un store_id che non esiste più. Migliora la
+  // integrità referenziale a costo di un leggero rallentamento in scrittura (accettabile).
+  db.run('PRAGMA foreign_keys = ON;');
+
   db.run(`
     CREATE TABLE IF NOT EXISTS stores (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,6 +64,28 @@ async function initDb() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_wines_created_at ON wines(created_at DESC);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_wines_rating ON wines(rating DESC);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_wines_wine_type ON wines(wine_type);`);
+
+  // Tabella superalcolici (grappa/rum/whisky/gin/…): analoga a wines ma con
+  //   spirit_type (anziché rosso/bianco) e abv (graduazione alcolica %).
+  // foto riusa il PHOTO_DIR comune: nessuna collisione perché i nomi file includono timestamp.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS spirits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      store_id INTEGER,
+      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 10),
+      note TEXT,
+      photo_path TEXT,
+      spirit_type TEXT,
+      abv REAL,
+      price REAL,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE SET NULL
+    );
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_spirits_created_at ON spirits(created_at DESC);`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_spirits_rating ON spirits(rating DESC);`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_spirits_spirit_type ON spirits(spirit_type);`);
 
   // Migrazione: aggiunge le colonne nuove ai DB creati prima dell'introduzione di wine_type/price.
   // PRAGMA table_info evita di mascherare errori veri con un try/catch sul ALTER TABLE.
@@ -436,6 +464,167 @@ app.delete('/api/wines/:id/photo', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- API: spirits (superalcolici) ----------
+// Stesse convenzioni di /api/wines dove possibile:
+//   - spirit_type: stringa libera normalizzata (lowercase + trim); nessun enum fisso
+//     così l'utente può aggiungere categorie nuove senza patch al server.
+//   - abv: numero 0..100 (percentuale alcolica), opzionale.
+//   - prezzo e rating come per i vini.
+// Le foto vengono ridimensionate e scritte nella stessa PHOTO_DIR dei vini:
+// i filename includono timestamp + basename quindi non collidono.
+
+const SPIRIT_TYPES = new Set([
+  'grappa','whisky','rum','brandy','cognac','gin','vodka','tequila','amaro','liquore','altro',
+]);
+
+function normalizeSpiritType(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim().toLowerCase();
+  if (!s) return null;
+  return s.slice(0, 40); // hard cap difensivo
+}
+
+app.get('/api/spirits', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
+  const sort = req.query.sort === 'rating' ? 's.rating DESC, s.created_at DESC' : 's.created_at DESC';
+  const rows = getAll(
+    `SELECT s.id, s.name, s.store_id, s.rating, s.note, s.photo_path, s.spirit_type, s.abv, s.price, s.created_at,
+            st.name AS store_name
+       FROM spirits s LEFT JOIN stores st ON st.id = s.store_id
+       ORDER BY ${sort}
+       LIMIT ?`,
+    [limit]
+  );
+  res.json(rows);
+});
+
+app.get('/api/spirits/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const s = getOne(
+    `SELECT s.*, st.name AS store_name
+       FROM spirits s LEFT JOIN stores st ON st.id = s.store_id
+       WHERE s.id=?`,
+    [id]
+  );
+  if (!s) return res.status(404).json({ error: 'superalcolico non trovato' });
+  res.json(s);
+});
+
+function validateSpiritBody(body) {
+  const name = (body?.name || '').trim();
+  const rating = parseInt(body?.rating, 10);
+  const note = (body?.note || '').trim() || null;
+  const storeIdRaw = body?.store_id;
+  const storeId = (storeIdRaw === '' || storeIdRaw == null) ? null : parseInt(storeIdRaw, 10);
+
+  if (!name) return { error: 'nome superalcolico obbligatorio' };
+  if (!Number.isInteger(rating) || rating < 1 || rating > 10) {
+    return { error: 'rating deve essere un intero tra 1 e 10' };
+  }
+  if (storeId !== null && !getOne(`SELECT id FROM stores WHERE id=?`, [storeId])) {
+    return { error: 'store_id non valido' };
+  }
+
+  const spiritType = normalizeSpiritType(body?.spirit_type);
+
+  const abvRaw = body?.abv;
+  let abv = null;
+  if (abvRaw !== '' && abvRaw != null) {
+    const n = Number(String(abvRaw).replace(',', '.'));
+    if (!Number.isFinite(n) || n < 0 || n > 100) {
+      return { error: 'abv non valido (serve numero 0..100)' };
+    }
+    abv = Math.round(n * 10) / 10;
+  }
+
+  const priceRaw = body?.price;
+  let price = null;
+  if (priceRaw !== '' && priceRaw != null) {
+    const n = Number(String(priceRaw).replace(',', '.'));
+    if (!Number.isFinite(n) || n < 0) {
+      return { error: 'price non valido (serve numero >= 0)' };
+    }
+    price = Math.round(n * 100) / 100;
+  }
+
+  return { name, rating, note, storeId, spiritType, abv, price };
+}
+
+app.post('/api/spirits', (req, res) => {
+  const v = validateSpiritBody(req.body);
+  if (v.error) return res.status(400).json({ error: v.error });
+
+  const id = runSql(
+    `INSERT INTO spirits (name, store_id, rating, note, spirit_type, abv, price) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [v.name, v.storeId, v.rating, v.note, v.spiritType, v.abv, v.price]
+  );
+  saveDB();
+  res.json({ id });
+});
+
+app.put('/api/spirits/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const exists = getOne(`SELECT id FROM spirits WHERE id=?`, [id]);
+  if (!exists) return res.status(404).json({ error: 'superalcolico non trovato' });
+
+  const v = validateSpiritBody(req.body);
+  if (v.error) return res.status(400).json({ error: v.error });
+
+  runSql(
+    `UPDATE spirits SET name=?, store_id=?, rating=?, note=?, spirit_type=?, abv=?, price=? WHERE id=?`,
+    [v.name, v.storeId, v.rating, v.note, v.spiritType, v.abv, v.price, id]
+  );
+  saveDB();
+  res.json({ ok: true });
+});
+
+app.delete('/api/spirits/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const s = getOne(`SELECT photo_path FROM spirits WHERE id=?`, [id]);
+  if (s && s.photo_path) {
+    const p = path.join(PHOTO_DIR, s.photo_path);
+    fs.unlink(p, () => { /* ignore */ });
+  }
+  runSql(`DELETE FROM spirits WHERE id=?`, [id]);
+  saveDB();
+  res.json({ ok: true });
+});
+
+// upload foto spirito: stesso processo di ridimensionamento dei vini (multer + jimp).
+app.post('/api/spirits/:id/photo', upload.single('photo'), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'id non valido' });
+  const exists = getOne(`SELECT id, photo_path FROM spirits WHERE id=?`, [id]);
+  if (!exists) return res.status(404).json({ error: 'superalcolico non trovato' });
+  if (!req.file) return res.status(400).json({ error: 'file mancante' });
+  try {
+    await ensurePhotoDir();
+    const { filename, width, height } = await processPhoto(req.file.path, req.file.originalname);
+    if (exists.photo_path) {
+      const old = path.join(PHOTO_DIR, exists.photo_path);
+      fs.unlink(old, () => { /* ignore */ });
+    }
+    runSql(`UPDATE spirits SET photo_path=? WHERE id=?`, [filename, id]);
+    saveDB();
+    res.json({ filename, width, height, url: `/photos/${filename}` });
+  } catch (e) {
+    res.status(500).json({ error: 'errore elaborazione foto: ' + (e.message || e) });
+  }
+});
+
+app.delete('/api/spirits/:id/photo', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const s = getOne(`SELECT photo_path FROM spirits WHERE id=?`, [id]);
+  if (!s) return res.status(404).json({ error: 'superalcolico non trovato' });
+  if (s.photo_path) {
+    const p = path.join(PHOTO_DIR, s.photo_path);
+    fs.unlink(p, () => { /* ignore */ });
+    runSql(`UPDATE spirits SET photo_path=NULL WHERE id=?`, [id]);
+    saveDB();
+  }
+  res.json({ ok: true });
+});
+
 // ---------- API: storage (foto, DB, disco) ----------
 
 app.get('/api/storage', (req, res) => {
@@ -588,6 +777,132 @@ app.get('/api/stats', (req, res) => {
     avg_rating: avgRating.avg_rating,
     top_wines: topWines,
     by_store: byStore,
+    by_month: byMonth,
+    recent,
+  });
+});
+
+// ---------- API: stats alcolici ----------
+// Ricalca la struttura del /api/stats ma sui superalcolici: totali + per negozio
+// raggruppato per spirit_type. I "tipi" sono liberi (stringhe) quindi raggruppiamo
+// dinamicamente in una mappa { type -> count, wines[], ... }.
+// Non restituiamo un count_bianco/rosso (che non ha senso qui) ma un
+// `by_type: [{ type, count, wines: [...] }]` parallelo al "Vini per negozio"
+// della stats principale.
+
+app.get('/api/spirits-stats', (req, res) => {
+  const totals = getOne(`SELECT COUNT(*) AS total_spirits FROM spirits`) || { total_spirits: 0 };
+  const storeCount = getOne(`SELECT COUNT(*) AS total_stores FROM stores`) || { total_stores: 0 };
+  const avgRating = getOne(`SELECT AVG(rating) AS avg_rating FROM spirits`) || { avg_rating: null };
+
+  const topSpirits = getAll(
+    `SELECT s.id, s.name, s.rating, st.name AS store_name
+       FROM spirits s LEFT JOIN stores st ON st.id = s.store_id
+       ORDER BY s.rating DESC, s.created_at DESC
+       LIMIT 5`
+  );
+
+  const allSpirits = getAll(
+    `SELECT s.id, s.name, s.store_id, s.rating, s.note, s.photo_path, s.spirit_type, s.abv, s.price,
+            s.created_at
+       FROM spirits s
+       ORDER BY s.created_at DESC`
+  );
+  const storesById = new Map();
+  for (const st of getAll(`SELECT id, name FROM stores`)) {
+    storesById.set(Number(st.id), st.name);
+  }
+
+  // Partiziona per negozio (con un blocco sintetico per i "senza negozio").
+  // All'interno di ogni negozio partizioniamo per spirit_type in modo che la
+  // pagina stats possa renderizzare tanti sottogruppi quanti sono i tipi.
+  // typeMap è una mappa dinamica perché spirit_type non è un enum chiuso.
+  const byStoreMap = new Map();
+  for (const s of allSpirits) {
+    const isGrouped = s.store_id == null;
+    const sId = isGrouped ? '__null_store__' : Number(s.store_id);
+    let entry = byStoreMap.get(sId);
+    if (!entry) {
+      const sName = isGrouped ? '— Senza negozio —' : storesById.get(Number(s.store_id));
+      if (!sName) continue;
+      entry = {
+        id: isGrouped ? null : Number(s.store_id),
+        name: sName,
+        count: 0,
+        avg_rating: null,
+        _ratingsSum: 0, _ratingsN: 0,
+        _types: new Map(),  // type → { type, count, wines: [] }
+      };
+      byStoreMap.set(sId, entry);
+    }
+    entry.count++;
+    if (Number.isInteger(s.rating)) { entry._ratingsSum += s.rating; entry._ratingsN++; }
+    // Spirit_type: normalizza ma mantieni la stringa originale per mostrarne l'etichetta
+    // (badge con meta, vedi spirits.js). Quando è null/'' usiamo il bucket 'nd' che è
+    // "non raggruppabile" ma comunque visibile nella pagina.
+    const tkey = (s.spirit_type && String(s.spirit_type).trim()) ? String(s.spirit_type).trim().toLowerCase() : 'nd';
+    let tt = entry._types.get(tkey);
+    if (!tt) {
+      tt = { type: tkey, label: s.spirit_type || 'Senza tipo', count: 0, wines: [] };
+      entry._types.set(tkey, tt);
+    }
+    tt.count++;
+    tt.wines.push({
+      id: s.id, name: s.name, rating: s.rating, price: s.price, note: s.note,
+      photo_path: s.photo_path, spirit_type: s.spirit_type, abv: s.abv,
+      created_at: s.created_at,
+    });
+  }
+
+  // Converti la mappa dei tipi in un array ordinato (più presenti prima, poi alfabetico).
+  const byStore = Array.from(byStoreMap.values()).map(s => {
+    const typesArr = Array.from(s._types.values())
+      .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
+    return {
+      id: s.id, name: s.name, count: s.count,
+      avg_rating: s._ratingsN > 0 ? +(s._ratingsSum / s._ratingsN).toFixed(2) : null,
+      types: typesArr,  // [{type, count, wines}]
+    };
+  }).sort((a, b) => {
+    if (a.id === null && b.id !== null) return 1;
+    if (a.id !== null && b.id === null) return -1;
+    return b.count - a.count || a.name.localeCompare(b.name);
+  });
+
+  // Distribuzione per tipo (di tutto il catalogo, indipendentemente dal negozio) per il
+  // eventuale "Sommario tipi" mostrato in pagina.
+  const globalTypes = new Map();
+  for (const s of allSpirits) {
+    const tkey = (s.spirit_type && String(s.spirit_type).trim()) ? String(s.spirit_type).trim().toLowerCase() : 'nd';
+    let entry = globalTypes.get(tkey);
+    if (!entry) { entry = { type: tkey, label: s.spirit_type || 'Senza tipo', count: 0 }; globalTypes.set(tkey, entry); }
+    entry.count++;
+  }
+  const byType = Array.from(globalTypes.values())
+    .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
+
+  const byMonth = getAll(
+    `SELECT substr(created_at, 1, 7) AS month, COUNT(*) AS count
+       FROM spirits
+       GROUP BY substr(created_at, 1, 7)
+       ORDER BY month DESC
+       LIMIT 12`
+  );
+  const recent = getAll(
+    `SELECT s.id, s.name, s.rating, s.created_at, s.photo_path, s.spirit_type, s.abv, s.price,
+            st.name AS store_name
+       FROM spirits s LEFT JOIN stores st ON st.id = s.store_id
+       ORDER BY s.created_at DESC
+       LIMIT 10`
+  );
+
+  res.json({
+    total_spirits: totals.total_spirits,
+    total_stores: storeCount.total_stores,
+    avg_rating: avgRating.avg_rating,
+    top_spirits: topSpirits,
+    by_store: byStore,
+    by_type: byType,
     by_month: byMonth,
     recent,
   });
@@ -748,26 +1063,51 @@ app.get('/api/export/wines.csv', (req, res) => {
   res.send('\ufeff' + lines.join('\n'));
 });
 
-// ---------- API: backup completo (ZIP: wines.csv + photos/ + MANIFEST.json) ----------
+// ---------- API: backup completo (ZIP: wines.csv + spirits.csv + photos/ + MANIFEST.json) ----------
+//   wines.csv       — vini (formato /api/export/wines.csv), separatore ';', BOM UTF-8
+//   spirits.csv    — superalcolici, stesso layout ma con colonna `abv` aggiuntiva
+//   photos/<basename> — uno per ogni file in PHOTO_DIR (ridimensionate 1024 px sul server)
+//   MANIFEST.json   — { schema_version, generated_at, wine_count, spirit_count, photo_count }
+// Schema versioni: 1 = solo vini (foto incluse, stesso PHOTO_DIR);
+//                  2 = vini + alcolici (corrente). I backup v1 sono ancora leggibili al restore.
 // Restituisce un archivio ZIP unico che contiene TUTTO lo stato utente salvabile:
 //   wines.csv             — stesso formato di /api/export/wines.csv (metadati testuali)
 //   photos/&lt;filename&gt;     — una copia di ogni file in PHOTO_DIR (foto ridimensionate 1024px)
 //   MANIFEST.json         — { schema_version, generated_at, wine_count, photo_count }
-// Limiti pratici: bufferizzato interamente in memoria (Zip.toBuffer) → per centinaia di vini
+// Limiti pratici: bufferizzato interamente in memoria (Zip.toBuffer) → per centinaia di record
 // con foto è tipicamente 5-50 MB, ben sotto i 256 MB di mem_limit del container.
+const BACKUP_SCHEMA_VERSION = 2;
+
 app.get('/api/backup', async (req, res) => {
   try {
-    const rows = getAll(
+    // ----- wines.csv -----
+    const wineRows = getAll(
       `SELECT w.id, w.name, w.wine_type, w.price, s.name AS store, w.rating, w.note, w.photo_path, w.created_at
          FROM wines w LEFT JOIN stores s ON s.id = w.store_id
          ORDER BY w.created_at ASC`
     );
-    const lines = ['id;name;type;price;store;rating;note;photo;created_at'];
-    for (const r of rows) {
+    const wineLines = ['id;name;type;price;store;rating;note;photo;created_at'];
+    for (const r of wineRows) {
       const priceStr = r.price != null ? Number(r.price).toFixed(2).replace('.', ',') : '';
-      lines.push([r.id, r.name, r.wine_type || '', priceStr, r.store || '', r.rating, r.note || '', r.photo_path || '', r.created_at].map(csvEscape).join(';'));
+      wineLines.push([r.id, r.name, r.wine_type || '', priceStr, r.store || '', r.rating, r.note || '', r.photo_path || '', r.created_at].map(csvEscape).join(';'));
     }
-    const csvText = '\ufeff' + lines.join('\n');
+    const wineCsvText = '\ufeff' + wineLines.join('\n');
+
+    // ----- spirits.csv (formato analogo a wines.csv ma con colonna `abv`) -----
+    const spiritRows = getAll(
+      `SELECT s.id, s.name, s.spirit_type, s.abv, s.price, st.name AS store, s.rating, s.note, s.photo_path, s.created_at
+         FROM spirits s LEFT JOIN stores st ON st.id = s.store_id
+         ORDER BY s.created_at ASC`
+    );
+    const spiritLines = ['id;name;type;abv;price;store;rating;note;photo;created_at'];
+    for (const r of spiritRows) {
+      // abv: virgola come separatore (compatibile con Excel-IT);
+      //   decimali utente preservati (38 vs 38.5 -> '38' vs '38,5').
+      const abvStr = r.abv != null ? String(r.abv).replace('.', ',') : '';
+      const priceStr = r.price != null ? Number(r.price).toFixed(2).replace('.', ',') : '';
+      spiritLines.push([r.id, r.name, r.spirit_type || '', abvStr, priceStr, r.store || '', r.rating, r.note || '', r.photo_path || '', r.created_at].map(csvEscape).join(';'));
+    }
+    const spiritCsvText = '\ufeff' + spiritLines.join('\n');
 
     let photoCount = 0;
     const photoFiles = [];
@@ -781,16 +1121,18 @@ app.get('/api/backup', async (req, res) => {
     }
 
     const manifest = {
-      schema_version: 1,
+      schema_version: BACKUP_SCHEMA_VERSION,
       generated_at: new Date().toISOString(),
       app: 'vini-pwa',
-      wine_count: rows.length,
+      wine_count: wineRows.length,
+      spirit_count: spiritRows.length,
       photo_count: photoCount,
     };
 
     const zip = new AdmZip();
     zip.addFile('MANIFEST.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'));
-    zip.addFile('wines.csv', Buffer.from(csvText, 'utf8'));
+    zip.addFile('wines.csv', Buffer.from(wineCsvText, 'utf8'));
+    zip.addFile('spirits.csv', Buffer.from(spiritCsvText, 'utf8'));
     for (const fullPath of photoFiles) {
       // addLocalFile(preferDot:true)␤place at "photos/&lt;basename&gt;". Niente path traversal: il basename
       // proviene da fs.readdirSync della nostra directory di lavoro.
@@ -801,7 +1143,8 @@ app.get('/api/backup', async (req, res) => {
     const yyyymmdd = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="vini-backup-${yyyymmdd}.zip"`);
-    res.setHeader('X-Wine-Count', String(rows.length));
+    res.setHeader('X-Wine-Count', String(wineRows.length));
+    res.setHeader('X-Spirit-Count', String(spiritRows.length));
     res.setHeader('X-Photo-Count', String(photoCount));
     res.send(buf);
   } catch (e) {
@@ -832,7 +1175,9 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
   }
   try { fs.unlinkSync(req.file.path); } catch (_) { /* best-effort cleanup */ }
 
-  // Validazione: MANIFEST.json deve esistere e avere schema_version=1.
+  // Validazione: MANIFEST.json deve esistere e avere schema_version=1 oppure 2.
+  //   1 = solo vini (legacy)
+  //   2 = vini + alcolici (corrente)
   const manifestEntry = zip.getEntry('MANIFEST.json');
   if (!manifestEntry) return res.status(400).json({ error: 'MANIFEST.json mancante (non è un backup valido)' });
   let manifest;
@@ -841,9 +1186,11 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
   } catch (e) {
     return res.status(400).json({ error: 'MANIFEST.json non parsabile' });
   }
-  if (Number(manifest.schema_version) !== 1) {
+  const schemaVer = Number(manifest.schema_version);
+  if (schemaVer !== 1 && schemaVer !== 2) {
     return res.status(400).json({ error: 'schema_version non supportato: ' + manifest.schema_version });
   }
+  const includeSpirits = (schemaVer === 2) && (zip.getEntry('spirits.csv') != null);
 
   const csvEntry = zip.getEntry('wines.csv');
   if (!csvEntry) return res.status(400).json({ error: 'wines.csv mancante nel backup' });
@@ -961,6 +1308,77 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
       }
     }
 
+    // 3b. (solo se backup v2 CON spirits.csv presente) Importa anche gli alcolici.
+    //     spirits.csv ha lo stesso layout di wines.csv ma con una colonna `abv`
+    //     aggiuntiva. spirit_type è una stringa libera qui, quindi niente whitelist:
+    //     ogni valore non vuoto viene accettato (lowercase + trim + cap 40 char).
+    let spiritsRestored = 0, spiritsErrors = 0;
+    if (includeSpirits) {
+      const spiritCsvEntry = zip.getEntry('spirits.csv');
+      const spiritCsvText = spiritCsvEntry.getData().toString('utf8');
+      const sRows = parseCsv(spiritCsvText).filter(r => r.some(c => (c || '').trim() !== ''));
+      if (sRows.length > 1) {
+        const sHeader = (sRows[0] || []).map(h => (h || '').toLowerCase().trim());
+        const sIdx = {
+          id: sHeader.indexOf('id'),
+          name: sHeader.indexOf('name'),
+          type: sHeader.indexOf('type'),
+          abv: sHeader.indexOf('abv'),
+          price: sHeader.indexOf('price'),
+          store: sHeader.indexOf('store'),
+          rating: sHeader.indexOf('rating'),
+          note: sHeader.indexOf('note'),
+          photo: sHeader.indexOf('photo'),
+          created_at: sHeader.indexOf('created_at'),
+        };
+        if (sIdx.name < 0 || sIdx.rating < 0 || sIdx.id < 0) {
+          db.run('ROLLBACK');
+          return res.status(400).json({ error: 'colonne "id", "name" o "rating" mancanti nell\'header di spirits.csv' });
+        }
+        // Parser dedicati per spirit_type (permessivo) e abv (0..100, 1 decimale).
+        // parsePrice è già definito sopra nell'handler.
+        function parseSpiritTypeRestore(raw) {
+          if (raw == null) return null;
+          const s = String(raw).trim().toLowerCase();
+          if (!s) return null;
+          return s.slice(0, 40);
+        }
+        function parseAbvRestore(raw) {
+          if (raw == null || raw === '') return null;
+          const n = Number(String(raw).trim().replace(',', '.'));
+          if (!Number.isFinite(n) || n < 0 || n > 100) return null;
+          return Math.round(n * 10) / 10;
+        }
+        for (let i = 1; i < sRows.length; i++) {
+          const row = sRows[i] || [];
+          const id = parseInt((row[sIdx.id] || '').trim(), 10);
+          if (!Number.isInteger(id) || id < 1) { spiritsErrors++; continue; }
+          const name = (row[sIdx.name] || '').trim();
+          const rating = parseInt((row[sIdx.rating] || '').trim(), 10);
+          if (!name) { spiritsErrors++; continue; }
+          if (!Number.isInteger(rating) || rating < 1 || rating > 10) { spiritsErrors++; continue; }
+          const storeId = (sIdx.store >= 0 && row[sIdx.store]) ? getOrCreateStore(String(row[sIdx.store]).trim()) : null;
+          const note = (sIdx.note >= 0 && row[sIdx.note] != null) ? String(row[sIdx.note]) : null;
+          const spiritType = parseSpiritTypeRestore(sIdx.type >= 0 ? row[sIdx.type] : null);
+          const abv = parseAbvRestore(sIdx.abv >= 0 ? row[sIdx.abv] : null);
+          const price = parsePrice(sIdx.price >= 0 ? row[sIdx.price] : null);
+          const createdAt = (sIdx.created_at >= 0 && row[sIdx.created_at]) ? String(row[sIdx.created_at]).trim() : null;
+          const photoPath = (sIdx.photo >= 0 && row[sIdx.photo]) ? String(row[sIdx.photo]).trim() : null;
+          try {
+            runSql(
+              `INSERT INTO spirits (id, name, store_id, rating, note, photo_path, spirit_type, abv, price, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [id, name, storeId, rating, note, photoPath || null, spiritType, abv, price, createdAt]
+            );
+            spiritsRestored++;
+            if (photoPath) photoSet.add(photoPath);  // accumula nel set già tracciato dai vini
+          } catch (e) {
+            spiritsErrors++;
+          }
+        }
+      }
+    }
+
     // 4. Scrivi le foto: solo quelle effettivamente referenziate dal CSV (evita di
     //    spargere file orfani che farebbero solo peso). Estrai ogni entries/photos/<file>.
     let photoWritten = 0, photoSkipped = 0;
@@ -988,8 +1406,11 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
 
     res.json({
       ok: true,
+      schema_version: schemaVer,
       wines: restored,
-      errors: errors,
+      spirits: spiritsRestored,
+      wine_errors: errors,
+      spirit_errors: spiritsErrors,
       photos_written: photoWritten,
       photos_skipped: photoSkipped,
     });

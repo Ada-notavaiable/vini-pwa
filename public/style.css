@@ -883,6 +883,131 @@ textarea { resize: vertical; min-height: 60px; }
 .store-details.hide-bianco .wine-subgroup.bianco { display: none; }
 .store-details.hide-rosso  .wine-subgroup.rosso  { display: none; }
 
+/* ---------- spirits: badge tipo, ABV, somma extra nella card ---------- */
+
+/* Il badge è la stessa "pillola" delle wine-type-badge ma con una palette
+   dedicata (ambra/teal/blue/rosa) per distinguerlo a colpo d'occhio dal vino. */
+.spirit-type-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  margin-left: 6px;
+  vertical-align: middle;
+  font-weight: 600;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+/* Palette per tipologia. I valori sono HSL-friendly pastelli per leggibilità
+   su entrambi i temi chiaro/scuro del popup. Tutti "(bianco)"-style per
+   garantire contrasto su sfondo scuro della card. */
+.spirit-type-badge.grappa  { background: #f4d8a5; color: #6b4715; border-color: #e2bb78; }
+.spirit-type-badge.whisky  { background: #efc88a; color: #5d3e10; border-color: #d6a15a; }
+.spirit-type-badge.rum     { background: #f2b58a; color: #6a3618; border-color: #d18750; }
+.spirit-type-badge.brandy  { background: #e9b58c; color: #6b3618; border-color: #cf8a59; }
+.spirit-type-badge.cognac  { background: #e8a5a5; color: #6a2424; border-color: #c87878; }
+.spirit-type-badge.gin     { background: #c7e5d8; color: #1e5e43; border-color: #95c7ad; }
+.spirit-type-badge.vodka   { background: #cee0ed; color: #274b76; border-color: #9bb8d2; }
+.spirit-type-badge.tequila { background: #f6e1a8; color: #6b5310; border-color: #d8bf7b; }
+.spirit-type-badge.amaro   { background: #cebb9a; color: #4a3815; border-color: #a9906b; }
+.spirit-type-badge.liquore { background: #efd2e0; color: #6f2c4d; border-color: #d09eb5; }
+.spirit-type-badge.nd      { background: #e5e2dc; color: #6c6a64; border-color: #c8c5be; }
+
+/* Bottone toggle nella header del <details> (coerente con subgroup-toggle-btn dei vini). */
+.subgroup-toggle-btn.spirit-type-toggle-btn { font-size: 0.72rem; }
+.subgroup-toggle-btn.grappa  { background: #f4d8a5; color: #6b4715; border-color: #e2bb78; }
+.subgroup-toggle-btn.whisky  { background: #efc88a; color: #5d3e10; border-color: #d6a15a; }
+.subgroup-toggle-btn.rum     { background: #f2b58a; color: #6a3618; border-color: #d18750; }
+.subgroup-toggle-btn.brandy  { background: #e9b58c; color: #6b3618; border-color: #cf8a59; }
+.subgroup-toggle-btn.cognac  { background: #e8a5a5; color: #6a2424; border-color: #c87878; }
+.subgroup-toggle-btn.gin     { background: #c7e5d8; color: #1e5e43; border-color: #95c7ad; }
+.subgroup-toggle-btn.vodka   { background: #cee0ed; color: #274b76; border-color: #9bb8d2; }
+.subgroup-toggle-btn.tequila { background: #f6e1a8; color: #6b5310; border-color: #d8bf7b; }
+.subgroup-toggle-btn.amaro   { background: #cebb9a; color: #4a3815; border-color: #a9906b; }
+.subgroup-toggle-btn.liquore { background: #efd2e0; color: #6f2c4d; border-color: #d09eb5; }
+.subgroup-toggle-btn.nd      { background: #e5e2dc; color: #6c6a64; border-color: #c8c5be; }
+
+/* Regole di visibility per i toggle spirit-type: il JS in stats-alcolici.html
+   applica direttamente .subgroup-hidden al .spirit-subgroup corrispondente
+   (no per-key CSS rule) così funziona anche per tipi personalizzati dell'utente.
+   Stessa logica delle .wine-subgroup usate dai vini (vedi sopra). */
+.spirit-subgroup.subgroup-hidden { display: none; }
+
+/* ABV pill (graduazione alcolica) — coerente con .price ma distinta. */
+.abv-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #ece6dc;
+  color: #5b4a26;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: 1px solid #d8cfb8;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Riga "prezzo + abv" sopra alle stelle nella card. */
+.wine-card .meta .meta-extras {
+  font-size: 0.85rem;
+  color: var(--text-soft);
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* "Senza tipo" (sub-sottogruppo) span - allineato alla palette desert/wine. */
+.store-details h4 .muted-count {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 0.82rem;
+}
+
+/* Sommario globale per tipo nella pagina stats-alcolici. */
+.type-summary { margin-bottom: 16px; }
+.type-summary-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.type-chip-count {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.12);
+  color: inherit;
+  font-size: 0.74rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* spirit-subgroup: stessi .wine-subgroup ma className diversa (così JS
+   la distingue dal vino). Il CSS è praticamente identico. */
+.spirit-subgroup {
+  margin: 10px 0 14px 0;
+}
+.spirit-subgroup h4 {
+  margin: 4px 0 6px 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
 /* ---------- wine detail modal (popup stats) ---------- */
 
 .wine-detail {

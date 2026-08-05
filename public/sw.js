@@ -1,15 +1,18 @@
 // Vini PWA — service worker
 // Cache-first per gli asset statici, network-only per le API.
 
-const CACHE_NAME = 'vinipwa-v8';
+const CACHE_NAME = 'vinipwa-v9';
 const ASSETS = [
   '/',
   '/index.html',
+  '/alcolici.html',
   '/negozi.html',
   '/stats.html',
+  '/stats-alcolici.html',
   '/storage.html',
   '/style.css',
   '/app.js',
+  '/spirits.js',
   '/manifest.json',
   '/icon-192.png',
   '/icon-512.png'

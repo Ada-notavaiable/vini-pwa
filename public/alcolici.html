@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#6a1b3d" />
-  <title>Vini — PWA</title>
+  <title>Alcolici — Vini PWA</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="stylesheet" href="/style.css" />
   <link rel="icon" href="/icon-192.png" type="image/png" />
@@ -12,10 +12,10 @@
 </head>
 <body>
   <header class="app-header">
-    <h1><span class="glass">🍷</span> Vini <span id="status-pill" class="status-pill offline">…</span></h1>
+    <h1><span class="glass">🥃</span> Alcolici <span id="status-pill" class="status-pill offline">…</span></h1>
     <nav class="tabs" id="nav-tabs">
-      <a class="tab active" href="/" data-tab="vini">Vini</a>
-      <a class="tab" href="/alcolici.html" data-tab="alcolici">Alcolici</a>
+      <a class="tab" href="/" data-tab="vini">Vini</a>
+      <a class="tab active" href="/alcolici.html" data-tab="alcolici">Alcolici</a>
       <a class="tab" href="/negozi.html" data-tab="negozi">Negozi</a>
       <a class="tab" href="/stats.html" data-tab="stats">Stats</a>
       <a class="tab" href="/stats-alcolici.html" data-tab="stats-alcolici">Stats Alcolici</a>
@@ -26,50 +26,76 @@
   <main class="container">
 
     <section class="form-card" id="form-card">
-      <h2 id="form-title">Aggiungi vino</h2>
-      <form id="wine-form" autocomplete="off">
-        <input type="hidden" id="wine-id" />
+      <h2 id="form-title">Aggiungi alcolico</h2>
+      <form id="spirit-form" autocomplete="off">
+        <input type="hidden" id="spirit-id" />
 
         <div class="form-row">
-          <label for="wine-name">Nome vino *</label>
-          <input id="wine-name" type="text" required placeholder="Es. Barolo Riserva 2018" />
+          <label for="spirit-name">Nome *</label>
+          <input id="spirit-name" type="text" required placeholder="Es. Grappa Berta Tre Soli Tre" />
         </div>
 
         <div class="form-row">
-          <label for="wine-store">Negozio</label>
-          <select id="wine-store">
+          <label for="spirit-store">Negozio</label>
+          <select id="spirit-store">
             <option value="">— non specificato —</option>
           </select>
         </div>
 
         <div class="form-row">
           <label>Tipo</label>
-          <div class="radio-group" role="radiogroup" aria-label="Tipo di vino">
+          <div class="radio-group" role="radiogroup" aria-label="Tipo di alcolico">
             <label class="radio-pill">
-              <input type="radio" name="wine_type" value="bianco" />
-              <span>🍾 Bianco</span>
+              <input type="radio" name="spirit_type" value="grappa" />
+              <span>🥃 Grappa</span>
             </label>
             <label class="radio-pill">
-              <input type="radio" name="wine_type" value="rosso" />
-              <span>🍷 Rosso</span>
+              <input type="radio" name="spirit_type" value="whisky" />
+              <span>🥃 Whisky</span>
             </label>
             <label class="radio-pill">
-              <input type="radio" name="wine_type" value="" checked />
-              <span>— N/D</span>
+              <input type="radio" name="spirit_type" value="rum" />
+              <span>🥃 Rum</span>
+            </label>
+            <label class="radio-pill">
+              <input type="radio" name="spirit_type" value="gin" />
+              <span>🍸 Gin</span>
+            </label>
+            <label class="radio-pill">
+              <input type="radio" name="spirit_type" value="vodka" />
+              <span>🍸 Vodka</span>
+            </label>
+            <label class="radio-pill">
+              <input type="radio" name="spirit_type" value="amaro" />
+              <span>🍵 Amaro</span>
+            </label>
+            <label class="radio-pill">
+              <input type="radio" name="spirit_type" value="liquore" />
+              <span>🍯 Liquore</span>
+            </label>
+            <label class="radio-pill">
+              <input type="radio" name="spirit_type" value="" checked />
+              <span>— N/D —</span>
             </label>
           </div>
+          <div class="help-text">Se serve un tipo non in lista, lascialo N/D per ora.</div>
         </div>
 
         <div class="form-row">
-          <label for="wine-price">Prezzo (€)</label>
-          <input id="wine-price" type="number" min="0" step="0.01" inputmode="decimal" placeholder="Es. 12,50" />
+          <label for="spirit-abv">Gradazione (% ABV)</label>
+          <input id="spirit-abv" type="number" min="0" max="100" step="0.1" inputmode="decimal" placeholder="Es. 40" />
+          <div class="help-text">Opzionale. Per grappa/rum/whisky/g/vodka è tipicamente 38–45°.</div>
+        </div>
+
+        <div class="form-row">
+          <label for="spirit-price">Prezzo (€)</label>
+          <input id="spirit-price" type="number" min="0" step="0.01" inputmode="decimal" placeholder="Es. 32,00" />
           <div class="help-text">Opzionale. Usa la virgola come separatore decimale.</div>
         </div>
 
         <div class="form-row">
           <label>Voto (1–10) *</label>
           <div class="stars" id="stars-input" role="radiogroup" aria-label="Voto">
-            <!-- 10 → 1 -->
             <input type="radio" id="r10" name="rating" value="10" /><label for="r10" title="10">★</label>
             <input type="radio" id="r9"  name="rating" value="9"  /><label for="r9" title="9">★</label>
             <input type="radio" id="r8"  name="rating" value="8"  /><label for="r8" title="8">★</label>
@@ -85,8 +111,8 @@
         </div>
 
         <div class="form-row">
-          <label for="wine-note">Nota</label>
-          <textarea id="wine-note" rows="3" placeholder="Profumo, sapore, occasione…"></textarea>
+          <label for="spirit-note">Nota</label>
+          <textarea id="spirit-note" rows="3" placeholder="Profumo, sapore, occasione…"></textarea>
         </div>
 
         <div class="form-row">
@@ -100,11 +126,14 @@
             <button type="button" class="btn btn-secondary" id="btn-take-photo">
               <span aria-hidden="true">📷</span> Scatta foto
             </button>
+            <button type="button" class="btn btn-danger" id="btn-remove-photo" hidden title="Elimina la foto attuale di questo alcolico">
+              <span aria-hidden="true">🗑️</span> Rimuovi foto
+            </button>
           </div>
           <div class="help-text">Verrà ridimensionata a 1024 px e salvata come JPEG per risparmiare spazio (max 8 MB in ingresso).</div>
           <div class="photo-preview" id="photo-preview" hidden>
             <img id="photo-preview-img" src="" alt="anteprima" />
-            <button type="button" class="btn btn-danger" id="remove-photo-btn">Rimuovi foto</button>
+            <button type="button" class="btn btn-secondary" id="clear-pending-photo">Cambia foto</button>
           </div>
         </div>
 
@@ -115,38 +144,39 @@
       </form>
     </section>
 
-    <div class="section-title">📖 I tuoi vini (<span id="count-wines">0</span>)</div>
+    <div class="section-title">📖 I tuoi alcolici (<span id="count-spirits">0</span>)</div>
 
-    <div id="wines-list" class="list"></div>
+    <div id="spirits-list" class="list"></div>
     <div id="empty-state" class="empty-state" hidden>
-      <span class="icon">🍇</span>
-      Nessun vino registrato.<br />Aggiungine uno sopra per iniziare!
+      <span class="icon">🥃</span>
+      Nessun superalcolico registrato.<br />Aggiungine uno sopra per iniziare!
     </div>
 
     <div class="btn-group" style="margin-top:16px;">
-      <a href="/api/export/wines.csv" class="btn btn-secondary">⬇️ Esporta CSV</a>
-      <input type="file" id="csv-input" accept=".csv,text/csv" hidden />
-      <button type="button" class="btn btn-secondary" id="import-csv-btn">📥 Importa CSV</button>
-      <span style="flex-basis:100%;height:0;"></span>
-      <a href="/api/backup" class="btn btn-secondary" id="backup-zip-btn" title="Scarica backup completo (CSV + foto) in un unico ZIP">⬇️ Backup completo</a>
-      <input type="file" id="backup-input" accept=".zip,application/zip" hidden />
-      <button type="button" class="btn btn-secondary" id="restore-zip-btn" title="Ripristina da un backup ZIP (sostituisce tutti i dati esistenti)">📥 Ripristina backup</button>
       <button type="button" class="btn btn-secondary" id="refresh-btn">🔄 Aggiorna</button>
       <button type="button" class="btn btn-secondary" id="update-app-btn" title="Scarica l'ultima versione dell'app">🆕 Aggiorna app</button>
+    </div>
+
+    <!-- Lightbox: zoom full-size sulla foto -->
+    <div class="modal-backdrop image-lightbox-backdrop" id="image-lightbox" aria-hidden="true">
+      <div class="image-lightbox" role="dialog" aria-modal="true" aria-label="Immagine ingrandita">
+        <button type="button" class="image-lightbox-close" id="image-lightbox-close" aria-label="Chiudi">✕</button>
+        <img id="image-lightbox-img" src="" alt="" />
+      </div>
     </div>
 
   </main>
 
   <footer class="app-footer">
-    Vini PWA · v1 · <a href="/README" target="_blank">info</a>
+    Alcolici · Vini PWA · v1 · <a href="/README" target="_blank">info</a>
   </footer>
 
   <div id="toast-container"></div>
 
-  <!-- Modal: conferma eliminazione vino -->
+  <!-- Modal: conferma eliminazione alcolico -->
   <div class="modal-backdrop" id="confirm-modal" aria-hidden="true">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
-      <h2 id="confirm-modal-title">Elimina vino</h2>
+      <h2 id="confirm-modal-title">Elimina alcolico</h2>
       <p id="confirm-modal-message" style="margin:0 0 12px 0;color:var(--text-soft);">Sei sicuro?</p>
       <div class="modal-actions">
         <button type="button" class="btn btn-secondary" id="confirm-modal-cancel">Annulla</button>
@@ -155,6 +185,6 @@
     </div>
   </div>
 
-  <script src="/app.js"></script>
+  <script src="/spirits.js"></script>
 </body>
 </html>

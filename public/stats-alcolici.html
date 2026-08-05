@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#6a1b3d" />
-  <title>Statistiche — Vini PWA</title>
+  <title>Statistiche Alcolici — Vini PWA</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="stylesheet" href="/style.css" />
   <link rel="icon" href="/icon-192.png" type="image/png" />
@@ -12,13 +12,13 @@
 </head>
 <body>
   <header class="app-header">
-    <h1><span class="glass">📊</span> Statistiche</h1>
+    <h1><span class="glass">🥃</span> Statistiche Alcolici</h1>
     <nav class="tabs">
       <a class="tab" href="/" data-tab="vini">Vini</a>
       <a class="tab" href="/alcolici.html" data-tab="alcolici">Alcolici</a>
       <a class="tab" href="/negozi.html" data-tab="negozi">Negozi</a>
-      <a class="tab active" href="/stats.html" data-tab="stats">Stats</a>
-      <a class="tab" href="/stats-alcolici.html" data-tab="stats-alcolici">Stats Alcolici</a>
+      <a class="tab" href="/stats.html" data-tab="stats">Stats</a>
+      <a class="tab active" href="/stats-alcolici.html" data-tab="stats-alcolici">Stats Alcolici</a>
       <a class="tab" href="/storage.html" data-tab="storage">Archivio</a>
     </nav>
   </header>
@@ -27,8 +27,8 @@
 
     <section class="stat-grid">
       <div class="stat-card">
-        <div class="value" id="stat-total-wines">—</div>
-        <div class="label">Vini totali</div>
+        <div class="value" id="stat-total-spirits">—</div>
+        <div class="label">Alcolici totali</div>
       </div>
       <div class="stat-card">
         <div class="value" id="stat-avg-rating">—</div>
@@ -45,10 +45,14 @@
     </section>
 
     <div class="help-text" style="margin: 0 0 12px 0;">
-      Tocca un negozio per espanderlo · un vino per i dettagli. Tocca 🍾 o 🍷 accanto al nome per mostrare/nascondere solo quel tipo di vini di quel negozio.
+      Tocca un negozio per espanderlo · un alcolico per i dettagli. Tocca l'icona del tipo accanto al nome del negozio per mostrare/nascondere solo gli alcolici di quel tipo.
     </div>
 
-    <div class="section-title">🏪 Vini per negozio</div>
+    <!-- Sommario globale per tipo (indipendente dal negozio) -->
+    <div class="section-title">🏷️ Tipi in catalogo</div>
+    <div id="by-type" class="type-summary"></div>
+
+    <div class="section-title">🏪 Alcolici per negozio</div>
     <div id="by-store"></div>
 
   </main>
@@ -56,24 +60,24 @@
   <footer class="app-footer">Vini PWA · v1</footer>
   <div id="toast-container"></div>
 
-  <!-- Modal: dettaglio vino -->
-  <div class="modal-backdrop" id="wine-modal" aria-hidden="true">
-    <div class="modal wine-detail" role="dialog" aria-modal="true" aria-labelledby="wine-modal-title">
-      <button type="button" class="modal-close" id="wine-modal-close" aria-label="Chiudi">✕</button>
+  <!-- Modal: dettaglio alcolico -->
+  <div class="modal-backdrop" id="spirit-modal" aria-hidden="true">
+    <div class="modal wine-detail" role="dialog" aria-modal="true" aria-labelledby="spirit-modal-title">
+      <button type="button" class="modal-close" id="spirit-modal-close" aria-label="Chiudi">✕</button>
 
-      <!-- Foto piccola in alto, adattata (no crop). Click → lightbox full-size. -->
       <div class="wine-detail-photo">
         <button type="button" class="thumb-btn" id="wd-photo-btn" hidden title="Clicca per vedere la foto più grande">
           <img id="wd-photo-img" alt="" loading="lazy" />
         </button>
-        <div class="no-photo" id="wd-no-photo" hidden>🍷</div>
+        <div class="no-photo" id="wd-no-photo" hidden>🥃</div>
       </div>
 
-      <h2 id="wine-modal-title" class="wine-detail-title"></h2>
+      <h2 id="spirit-modal-title" class="wine-detail-title"></h2>
 
       <div class="wine-detail-meta">
         <div class="wm-row"><span class="wm-lbl">🏪 Negozio</span><span class="wm-val" id="wd-store"></span></div>
         <div class="wm-row"><span class="wm-lbl">Tipo</span><span class="wm-val" id="wd-type"></span></div>
+        <div class="wm-row"><span class="wm-lbl">Gradazione</span><span class="wm-val" id="wd-abv"></span></div>
         <div class="wm-row"><span class="wm-lbl">Prezzo</span><span class="wm-val" id="wd-price"></span></div>
         <div class="wm-row"><span class="wm-lbl">Voto</span><span class="wm-val" id="wd-stars"></span></div>
         <div class="wm-row"><span class="wm-lbl">Aggiunto</span><span class="wm-val" id="wd-date"></span></div>
@@ -83,13 +87,13 @@
       </div>
 
       <div class="modal-actions">
-        <button type="button" class="btn btn-secondary" id="wine-modal-close-2">Chiudi</button>
-        <button type="button" class="btn btn-danger" id="wine-modal-delete">🗑️ Elimina</button>
+        <button type="button" class="btn btn-secondary" id="spirit-modal-close-2">Chiudi</button>
+        <button type="button" class="btn btn-danger" id="spirit-modal-delete">🗑️ Elimina</button>
       </div>
     </div>
   </div>
 
-  <!-- Lightbox: zoom full-size sulla foto del vino -->
+  <!-- Lightbox foto -->
   <div class="modal-backdrop image-lightbox-backdrop" id="image-lightbox" aria-hidden="true">
     <div class="image-lightbox" role="dialog" aria-modal="true" aria-label="Immagine ingrandita">
       <button type="button" class="image-lightbox-close" id="image-lightbox-close" aria-label="Chiudi">✕</button>
@@ -125,7 +129,13 @@
         } catch (_) { return '€' + n.toFixed(2); }
       }
 
-      // Stelle piene N + numero N/10 (senza stelle vuote). rating 1..10 atteso.
+      function fmtAbv(abv) {
+        if (abv == null) return '—';
+        const n = Number(abv);
+        if (!Number.isFinite(n)) return '—';
+        return (Number.isInteger(n) ? String(n) : n.toFixed(1)) + '°';
+      }
+
       function ratingPillHtml(rating) {
         const r = Number(rating);
         if (!Number.isInteger(r) || r < 1 || r > 10) {
@@ -138,23 +148,50 @@
                '</span>';
       }
 
-      function wineTypeBadgeHtml(wt) {
-        if (wt === 'bianco') return '<span class="wine-type-badge bianco">🍾 Bianco</span>';
-        if (wt === 'rosso')  return '<span class="wine-type-badge rosso">🍷 Rosso</span>';
-        return '<span class="wine-type-badge nd">— N/D —</span>';
+      // ---- tipi alcolici: mappa coerente con public/spirits.js ----
+      const SPIRIT_TYPES = {
+        grappa:  { emoji: '🥃', label: 'Grappa' },
+        whisky:  { emoji: '🥃', label: 'Whisky' },
+        rum:     { emoji: '🥃', label: 'Rum' },
+        brandy:  { emoji: '🥃', label: 'Brandy' },
+        cognac:  { emoji: '🥃', label: 'Cognac' },
+        gin:     { emoji: '🍸', label: 'Gin' },
+        vodka:   { emoji: '🍸', label: 'Vodka' },
+        tequila: { emoji: '🌵', label: 'Tequila' },
+        amaro:   { emoji: '🍵', label: 'Amaro' },
+        liquore: { emoji: '🍯', label: 'Liquore' },
+      };
+      function spiritTypeKey(st) {
+        return (st && String(st).trim()) ? String(st).trim().toLowerCase() : 'nd';
+      }
+      function spiritTypeLabel(st) {
+        if (!st) return 'Senza tipo';
+        const k = String(st).toLowerCase().trim();
+        return (SPIRIT_TYPES[k] && SPIRIT_TYPES[k].label) || st;
+      }
+      function spiritTypeEmoji(st) {
+        if (!st) return '🏷️';
+        const k = String(st).toLowerCase().trim();
+        return (SPIRIT_TYPES[k] && SPIRIT_TYPES[k].emoji) || '🏷️';
+      }
+      function spiritTypeBadgeHtml(st) {
+        const label = spiritTypeLabel(st);
+        const key = spiritTypeKey(st);
+        const emoji = spiritTypeEmoji(st);
+        return '<span class="spirit-type-badge ' + escapeHtml(key) + '" title="' + escapeHtml(label) + '">' + emoji + ' ' + escapeHtml(label) + '</span>';
       }
 
-      // ---------- rendering: card vino ----------
+      // ---------- card alcolico ----------
 
-      function createWineCard(w, storeName) {
+      function createSpiritCard(w, storeName) {
         const card = document.createElement('div');
-        card.className = 'wine-card';
+        card.className = 'wine-card spirit-card';
         card.dataset.id = w.id;
-        card.__wineData = { wine: w, storeName: storeName };
+        card.__spiritData = { spirit: w, storeName: storeName };
 
         const thumbH = w.photo_path
           ? '<img src="/photos/' + encodeURIComponent(w.photo_path) + '" alt="" loading="lazy" />'
-          : '🍷';
+          : '🥃';
 
         card.innerHTML = `
           <div class="thumb">${thumbH}</div>
@@ -162,7 +199,7 @@
             <div class="name"></div>
             <div class="store"></div>
             ${w.note ? '<div class="note-preview"></div>' : ''}
-            ${w.price != null && Number.isFinite(Number(w.price)) ? '<div class="price"></div>' : ''}
+            <div class="meta-extras"></div>
           </div>
           <div class="right">
             <div class="stars compact stars-readonly"></div>
@@ -174,16 +211,25 @@
         const storeText = storeName ? storeName : '— senza negozio —';
         card.querySelector('.store').textContent = storeText + (Number.isInteger(r) ? ' · voto ' + r : '');
         if (w.note) card.querySelector('.note-preview').textContent = w.note;
+        const extras = card.querySelector('.meta-extras');
         if (w.price != null && Number.isFinite(Number(w.price))) {
-          card.querySelector('.price').textContent = fmtPriceStats(w.price);
+          const sp = document.createElement('span');
+          sp.className = 'price';
+          sp.textContent = fmtPriceStats(w.price);
+          extras.appendChild(sp);
+        }
+        if (w.abv != null && Number.isFinite(Number(w.abv))) {
+          const ab = document.createElement('span');
+          ab.className = 'abv-badge';
+          ab.title = 'Gradazione alcolica';
+          ab.textContent = '🧪 ' + fmtAbv(w.abv);
+          extras.appendChild(ab);
         }
         card.querySelector('.date').textContent = (w.created_at || '').slice(0, 10);
         card.querySelector('.stars').innerHTML = starsInner10(r);
         return card;
       }
 
-      // 10 stelle compatte (5 piene + 5 grigie) usate SOLO nelle card della lista.
-      // Il popup invece usa ratingPillHtml() per mostrare solo le stelle piene + numero.
       function starsInner10(rating) {
         const r = Number(rating) || 0;
         let html = '';
@@ -193,7 +239,7 @@
         return html;
       }
 
-      // ---------- rendering: gruppo negozio ----------
+      // ---------- gruppo per negozio ----------
 
       function renderStoreGroup(s) {
         const d = document.createElement('details');
@@ -202,75 +248,96 @@
 
         const sum = document.createElement('summary');
         const avg = s.avg_rating != null ? ' · voto medio ' + Number(s.avg_rating).toFixed(1) : '';
-        // 🍾 Bianchi e 🍷 Rossi sono BOTTONI cliccabili: ognuno nasconde SOLO
-        // il proprio sottogruppo di QUEL negozio. "Senza tipo" resta uno span
-        // (non filtrabile).
         const countBits = [];
-        if (s.count_bianco) countBits.push('<button type="button" class="subgroup-toggle-btn bianco" data-target="bianco" aria-pressed="true" title="Mostra/nascondi i 🍾 Bianchi di questo negozio">🍾 ' + s.count_bianco + '</button>');
-        if (s.count_rosso)  countBits.push('<button type="button" class="subgroup-toggle-btn rosso" data-target="rosso" aria-pressed="true" title="Mostra/nascondi i 🍷 Rossi di questo negozio">🍷 ' + s.count_rosso + '</button>');
-        if (s.count_null)   countBits.push('<span class="count-tag null">N/D ' + s.count_null + '</span>');
+        // Ogni tipo ha un toggle cliccabile che nasconde SOLO il proprio sottogruppo
+        // di QUEL negozio. Il toggleキー usa "spirit-type" (più generico di
+        // "wine-type") per distinguerli dai 🍾/🍷 del vino.
+        if (Array.isArray(s.types)) {
+          for (const t of s.types) {
+            const key = spiritTypeKey(t.type);
+            const emoji = spiritTypeEmoji(t.type);
+            const label = spiritTypeLabel(t.type);
+            countBits.push(
+              '<button type="button" class="subgroup-toggle-btn spirit-type-toggle-btn ' +
+              escapeHtml(key) + '" data-spirit-type="' + escapeHtml(key) + '" aria-pressed="true" ' +
+              'title="Mostra/nascondi ' + escapeHtml(emoji + ' ' + label) + ' di questo negozio">' +
+              emoji + ' ' + escapeHtml(label) + ' ' + t.count + '</button>'
+            );
+          }
+        }
+
         sum.innerHTML =
           '<div class="store-title-cell"><strong>' + escapeHtml(s.name) + '</strong>' +
           '<span class="help-text" style="margin-left:6px;">' +
-          s.count + ' vini' + avg +
+          s.count + ' alcolici' + avg +
           '</span></div>' +
           '<div class="store-counts">' + countBits.join('') + '</div>';
         d.appendChild(sum);
 
-        // Bind dei due toggle: ciascuno aggiunge .hide-<target> al proprio
-        // .store-details quando è "spento". Ogni toggle agisce SOLO sul
-        // sottogruppo corrispondente (bianco o rosso).
+        // Bind toggle per ogni tipo: nascondi il .spirit-subgroup corrispondente
+        // aggiungendo .subgroup-hidden DIRETTAMENTE al sotto-blocco (non al parent
+        // via .hide-spirit-<key>): in questo modo funziona anche per tipi
+        // personalizzati dell'utente (es. "limoncello") senza richiedere una regola
+        // CSS per ogni possibile chiave. Scope per-negozio: il click è legato al
+        // singolo <details> tramite `d`, quindi non interferisce con altri negozi.
         sum.querySelectorAll('.subgroup-toggle-btn').forEach(btn => {
           btn.addEventListener('click', (ev) => {
             ev.preventDefault();
-            ev.stopPropagation(); // non far toggle del <details>
-            const target = btn.dataset.target; // 'bianco' | 'rosso'
-            const visible = btn.getAttribute('aria-pressed') !== 'false';
-            const nextVisible = !visible;
+            ev.stopPropagation();  // non far toggle del <details>
+            const target = btn.dataset.spiritType;  // 'grappa' | 'whisky' | 'nd' | 'limoncello' | ...
+            const nextVisible = btn.getAttribute('aria-pressed') === 'false';
             btn.setAttribute('aria-pressed', String(nextVisible));
-            d.classList.toggle('hide-' + target, !nextVisible);
+            d.querySelectorAll('.spirit-subgroup').forEach(grp => {
+              if (grp.classList.contains(target)) {
+                grp.classList.toggle('subgroup-hidden', !nextVisible);
+              }
+            });
           });
         });
 
         const content = document.createElement('div');
         content.className = 'store-content list';
 
-        function addGroup(cls, badge, items) {
-          const grp = document.createElement('div');
-          grp.className = 'wine-subgroup ' + cls;
-          const h = document.createElement('h4');
-          h.innerHTML = badge + ' (' + items.length + ')';
-          grp.appendChild(h);
-          if (!items.length) {
-            const empty = document.createElement('div');
-            empty.className = 'help-text';
-            empty.style.padding = '2px 6px 8px 6px';
-            empty.textContent = 'Nessun vino di questo tipo.';
-            grp.appendChild(empty);
-          } else {
-            items.forEach(w => grp.appendChild(createWineCard(w, s.name)));
+        // Crea un <div> per ogni tipo (preserva ordine API, già count desc).
+        if (Array.isArray(s.types)) {
+          for (const t of s.types) {
+            const grp = document.createElement('div');
+            const cls = spiritTypeKey(t.type);
+            grp.className = 'spirit-subgroup ' + cls;
+            const h = document.createElement('h4');
+            const lbl = spiritTypeLabel(t.type);
+            h.innerHTML = spiritTypeEmoji(t.type) + ' ' + escapeHtml(lbl) +
+                          ' <span class="muted-count">(' + t.count + ')</span>';
+            grp.appendChild(h);
+            if (!t.wines || !t.wines.length) {
+              const empty = document.createElement('div');
+              empty.className = 'help-text';
+              empty.style.padding = '2px 6px 8px 6px';
+              empty.textContent = 'Nessun alcolico di questo tipo.';
+              grp.appendChild(empty);
+            } else {
+              t.wines.forEach(w => grp.appendChild(createSpiritCard(w, s.name)));
+            }
+            content.appendChild(grp);
           }
-          content.appendChild(grp);
         }
-        addGroup('bianco', '🍾 Bianchi',  (s.wines && s.wines.bianco)    || []);
-        addGroup('rosso',  '🍷 Rossi',    (s.wines && s.wines.rosso)     || []);
-        addGroup('null',   'Senza tipo',  (s.wines && s.wines.null_type) || []);
         d.appendChild(content);
         return d;
       }
 
-      // ---------- modal: dettaglio vino ----------
+      // ---------- modal: dettaglio ----------
 
-      let currentWineModal = null;
-      let lastWineModalTrigger = null;
+      let currentSpiritModal = null;
+      let lastSpiritModalTrigger = null;
 
-      function openWineModal(w, storeName, trigger) {
-        currentWineModal = { wine: w, storeName: storeName };
-        lastWineModalTrigger = trigger || null;
+      function openSpiritModal(w, storeName, trigger) {
+        currentSpiritModal = { spirit: w, storeName: storeName };
+        lastSpiritModalTrigger = trigger || null;
 
-        $('wine-modal-title').textContent = w.name;
+        $('spirit-modal-title').textContent = w.name;
         $('wd-store').textContent = storeName ? storeName : '— senza negozio —';
-        $('wd-type').innerHTML = wineTypeBadgeHtml(w.wine_type);
+        $('wd-type').innerHTML = spiritTypeBadgeHtml(w.spirit_type);
+        $('wd-abv').textContent = fmtAbv(w.abv);
         $('wd-price').textContent = (w.price != null && Number.isFinite(Number(w.price)))
           ? fmtPriceStats(w.price)
           : '—';
@@ -285,7 +352,6 @@
           $('wd-note-row').hidden = true;
         }
 
-        // Foto piccola (thumbnail) — mostrata solo se photo_path presente.
         const photoBtn = $('wd-photo-btn');
         const photoImg = $('wd-photo-img');
         const noPhoto = $('wd-no-photo');
@@ -300,127 +366,143 @@
           noPhoto.hidden = false;
         }
 
-        $('wine-modal').classList.add('open');
-        $('wine-modal').setAttribute('aria-hidden', 'false');
+        $('spirit-modal').classList.add('open');
+        $('spirit-modal').setAttribute('aria-hidden', 'false');
         document.body.style.overflow = 'hidden';
-        try { $('wine-modal-close').focus({ preventScroll: true }); } catch (_) { /* ignore */ }
+        try { $('spirit-modal-close').focus({ preventScroll: true }); } catch (_) { /* ignore */ }
       }
 
-      function closeWineModal() {
-        $('wine-modal').classList.remove('open');
-        $('wine-modal').setAttribute('aria-hidden', 'true');
+      function closeSpiritModal() {
+        $('spirit-modal').classList.remove('open');
+        $('spirit-modal').setAttribute('aria-hidden', 'true');
         document.body.style.overflow = '';
-        if (lastWineModalTrigger && typeof lastWineModalTrigger.focus === 'function') {
-          try { lastWineModalTrigger.focus({ preventScroll: true }); } catch (_) { /* ignore */ }
+        if (lastSpiritModalTrigger && typeof lastSpiritModalTrigger.focus === 'function') {
+          try { lastSpiritModalTrigger.focus({ preventScroll: true }); } catch (_) { /* ignore */ }
         }
-        lastWineModalTrigger = null;
-        currentWineModal = null;
+        lastSpiritModalTrigger = null;
+        currentSpiritModal = null;
       }
 
-      $('wine-modal-close').addEventListener('click', closeWineModal);
-      $('wine-modal-close-2').addEventListener('click', closeWineModal);
-      $('wine-modal').addEventListener('click', (ev) => {
-        if (ev.target === $('wine-modal')) closeWineModal();
+      $('spirit-modal-close').addEventListener('click', closeSpiritModal);
+      $('spirit-modal-close-2').addEventListener('click', closeSpiritModal);
+      $('spirit-modal').addEventListener('click', (ev) => {
+        if (ev.target === $('spirit-modal')) closeSpiritModal();
       });
 
-      // ---------- lightbox foto (click sulla thumbnail dentro al popup) ----------
+      // ---------- lightbox ----------
 
       let lastImgTrigger = null;
-
       function openImageLightbox(src, alt, trigger) {
+        lastImgTrigger = trigger || null;
         const lb = $('image-lightbox');
         const img = $('image-lightbox-img');
-        lastImgTrigger = trigger || null;
-        img.src = src;
-        img.alt = alt || '';
+        img.src = src; img.alt = alt || '';
         lb.classList.add('open');
         lb.setAttribute('aria-hidden', 'false');
         document.body.style.overflow = 'hidden';
         try { $('image-lightbox-close').focus({ preventScroll: true }); } catch (_) { /* ignore */ }
       }
-
       function closeImageLightbox() {
         const lb = $('image-lightbox');
         const img = $('image-lightbox-img');
         lb.classList.remove('open');
         lb.setAttribute('aria-hidden', 'true');
-        // non resettare src subito: fade-out. Teniamolo breve.
         setTimeout(() => { try { img.src = ''; img.alt = ''; } catch (_) {} }, 200);
         document.body.style.overflow = '';
         if (lastImgTrigger && typeof lastImgTrigger.focus === 'function') {
           try { lastImgTrigger.focus({ preventScroll: true }); } catch (_) { /* ignore */ }
         }
-        lastImgTrigger = null;
       }
-
       $('image-lightbox-close').addEventListener('click', closeImageLightbox);
       $('image-lightbox').addEventListener('click', (ev) => {
         if (ev.target === $('image-lightbox')) closeImageLightbox();
       });
-
-      // Click sulla thumbnail dentro al popup → apre il lightbox full-size.
       $('wd-photo-btn').addEventListener('click', () => {
-        const w = currentWineModal && currentWineModal.wine;
+        const w = currentSpiritModal && currentSpiritModal.spirit;
         if (!w || !w.photo_path) return;
         openImageLightbox('/photos/' + encodeURIComponent(w.photo_path), w.name, $('wd-photo-btn'));
       });
 
-      // ---------- delega click: qualsiasi wine-card apre il popup ----------
-
+      // delega: click su qualunque spirit-card apre il popup
       document.addEventListener('click', (ev) => {
-        const card = ev.target.closest('.wine-card[data-id]');
+        const card = ev.target.closest('.spirit-card[data-id]');
         if (!card) return;
-        const data = card.__wineData;
+        const data = card.__spiritData;
         if (!data) return;
         ev.preventDefault();
-        openWineModal(data.wine, data.storeName, card);
+        openSpiritModal(data.spirit, data.storeName, card);
       });
 
-      // ---------- ESC globale per chiudere il modal in primo piano ----------
-
+      // ESC: chiudi prima il lightbox, poi il modal
       document.addEventListener('keydown', (ev) => {
         if (ev.key !== 'Escape') return;
-        // L'immagine-lightbox sta sopra al wine-modal → chiudila prima.
         if ($('image-lightbox').classList.contains('open')) { closeImageLightbox(); return; }
-        if ($('wine-modal').classList.contains('open'))    { closeWineModal();    return; }
+        if ($('spirit-modal').classList.contains('open'))     { closeSpiritModal();    return; }
       });
 
-      // ---------- elimina vino dal popup ----------
-
-      $('wine-modal-delete').addEventListener('click', async () => {
-        if (!currentWineModal) return;
-        const w = currentWineModal.wine;
-        const ok = confirm('Eliminare "' + (w.name || 'questo vino') + '"? L\'operazione è irreversibile.');
+      // elimina alcolico dal popup
+      $('spirit-modal-delete').addEventListener('click', async () => {
+        if (!currentSpiritModal) return;
+        const w = currentSpiritModal.spirit;
+        const ok = confirm('Eliminare "' + (w.name || 'questo alcolico') + '"? L\'operazione è irreversibile.');
         if (!ok) return;
         try {
-          const r = await fetch('/api/wines/' + w.id, { method: 'DELETE' });
+          const r = await fetch('/api/spirits/' + w.id, { method: 'DELETE' });
           if (!r.ok) throw new Error('HTTP ' + r.status);
-          toast('Vino eliminato', 'success');
-          closeWineModal();
+          toast('Alcolico eliminato', 'success');
+          closeSpiritModal();
           loadStats();
         } catch (e) {
           toast('Errore: ' + e.message, 'error');
         }
       });
 
+      // ---------- sommario tipi globale ----------
+
+      function renderByType(types) {
+        const wrap = $('by-type');
+        wrap.innerHTML = '';
+        if (!types || !types.length) {
+          wrap.innerHTML = '<div class="empty-state"><span class="icon">🏷️</span>Nessun tipo ancora.</div>';
+          return;
+        }
+        const list = document.createElement('div');
+        list.className = 'type-summary-list';
+        for (const t of types) {
+          const key = spiritTypeKey(t.type);
+          const label = spiritTypeLabel(t.type);
+          const emoji = spiritTypeEmoji(t.type);
+          const chip = document.createElement('span');
+          chip.className = 'type-chip spirit-type-badge ' + escapeHtml(key);
+          const cnt = document.createElement('span');
+          cnt.className = 'type-chip-count';
+          cnt.textContent = t.count;
+          chip.append(cnt, ' ', emoji, ' ', document.createTextNode(label));
+          list.appendChild(chip);
+        }
+        wrap.appendChild(list);
+      }
+
       // ---------- load stats ----------
 
       async function loadStats() {
         try {
-          const r = await fetch('/api/stats');
+          const r = await fetch('/api/spirits-stats');
           if (!r.ok) throw new Error('HTTP ' + r.status);
           const s = await r.json();
 
-          $('stat-total-wines').textContent = s.total_wines ?? 0;
+          $('stat-total-spirits').textContent = s.total_spirits ?? 0;
           $('stat-avg-rating').textContent = s.avg_rating != null ? Number(s.avg_rating).toFixed(1) : '—';
           $('stat-total-stores').textContent = s.total_stores ?? 0;
-          const maxR = Array.isArray(s.top_wines) && s.top_wines.length ? s.top_wines[0].rating : null;
+          const maxR = Array.isArray(s.top_spirits) && s.top_spirits.length ? s.top_spirits[0].rating : null;
           $('stat-best-rating').textContent = maxR != null ? maxR + '/10' : '—';
+
+          renderByType(s.by_type);
 
           const bs = $('by-store');
           bs.innerHTML = '';
           if (!s.by_store || !s.by_store.length) {
-            bs.innerHTML = '<div class="empty-state"><span class="icon">🏪</span>Nessun negozio.</div>';
+            bs.innerHTML = '<div class="empty-state"><span class="icon">🏪</span>Nessun alcolico ancora.</div>';
           } else {
             s.by_store.forEach(row => bs.appendChild(renderStoreGroup(row)));
           }
