@@ -104,9 +104,9 @@
   // ---------- stato ----------
 
   let editingId = null;
-  let currentPhotoPath = null;
-  let pendingPhotoFile = null;
-  let pendingPhotoUrl = null;
+  // Dichiarazioni foto (pendingPhotoFiles, existingPhotos, pendingRemovals,
+  // pendingPhotoUrls, pendingPhotoFile/Url legacy, currentPhotoPath) sono definite
+  // più sotto nella sezione "galleria foto (multi-foto per spirito)".
   let deferredInstallPrompt = null;
 
   const PHOTO_CLIENT_MAX_DIM = 1600;
@@ -206,11 +206,16 @@
       const thumbH = s.photo_path
         ? '<img src="/photos/' + encodeURIComponent(s.photo_path) + '" alt="" loading="lazy" />'
         : '🥃';
+      // Badge "📷 N" se il spirito ha più di 1 foto (galleria scorrevole nel lightbox)
+      const badgeH = (Number(s.photo_count) > 1)
+        ? '<div class="thumb-photo-counter" aria-label="' + s.photo_count + ' foto">' +
+            '<span aria-hidden="true">📷</span>' + s.photo_count + '</div>'
+        : '';
 
       const abvHtml = fmtAbv(s.abv);
       card.innerHTML = `
         <button type="button" class="wine-delete-btn" aria-label="Elimina alcolico" title="Elimina">🗑</button>
-        <div class="thumb">${thumbH}</div>
+        <div class="thumb">${thumbH}${badgeH}</div>
         <div class="meta">
           <div class="name">${escapeHtml(s.name)}${spiritTypeBadge(s.spirit_type)}</div>
           <div class="store">${escapeHtml(s.store_name || '— senza negozio —')}</div>
@@ -251,13 +256,8 @@
   }
 
   // ---------- form logic ----------
-
-  function clearPendingPhoto() {
-    if (pendingPhotoUrl) { URL.revokeObjectURL(pendingPhotoUrl); pendingPhotoUrl = null; }
-    pendingPhotoFile = null;
-    $('photo-preview').hidden = true;
-    $('photo-preview-img').src = '';
-  }
+  // clearPendingPhoto() è ridefinito nella sezione galleria foto come wrapper
+  // attorno a clearPhotoGallery() per retrocompatibilità del codice legacy.
 
   function resetForm() {
     editingId = null;
@@ -292,14 +292,19 @@
     if (radio) radio.checked = true;
     const sT = (s.spirit_type && SPIRIT_TYPES[String(s.spirit_type).toLowerCase()]) ? String(s.spirit_type).toLowerCase() : '';
     document.querySelectorAll('input[name="spirit_type"]').forEach(r => { r.checked = (r.value === sT); });
-    if (s.photo_path) {
-      $('photo-preview').hidden = false;
-      $('photo-preview-img').src = '/photos/' + encodeURIComponent(s.photo_path);
-      $('btn-remove-photo').hidden = false;
-    } else {
-      clearPendingPhoto();
-      $('btn-remove-photo').hidden = true;
-    }
+    // Pulisci la galleria pending e carica quella esistente via GET /api/spirits/:id.
+    pendingPhotoFiles = [];
+    revokePendingPhotoUrls();
+    pendingRemovals = [];
+    existingPhotos = [];
+    pendingPhotoFile = null;
+    pendingPhotoUrl = null;
+    fetchSpiritFull(s.id).then(full => {
+      existingPhotos = (full.photos || []).slice();
+      currentPhotoPath = full.photo_path || null;
+      renderPhotoGallery();
+    }).catch(() => { renderPhotoGallery(); });
+    renderPhotoGallery();
     $('form-title').textContent = 'Modifica: ' + (s.name || '');
     $('save-btn').textContent = 'Aggiorna';
     $('cancel-edit-btn').hidden = false;
@@ -354,56 +359,178 @@
 
   // ---------- bind photo inputs ----------
 
-  function bindPhotoFileInput(input) {
-    input.addEventListener('change', async (ev) => {
-      const file = input.files && input.files[0];
-      if (!file) return;
-      // reset SUBITO per consentire la riselezione dello stesso file (iOS altrimenti blocca)
-      input.value = '';
-      // preview immediato del file originale (così l'utente vede già qualcosa anche
-      // durante il resize)
-      if (pendingPhotoUrl) { URL.revokeObjectURL(pendingPhotoUrl); }
-      pendingPhotoFile = file;
-      pendingPhotoUrl = URL.createObjectURL(file);
-      $('photo-preview').hidden = false;
-      $('photo-preview-img').src = pendingPhotoUrl;
+  // ---------- galleria foto (multi-foto per spirito) ----------
+  // NB: il flusso single-photo legacy è stato sostituito. pendingPhotoFile e
+  //     l'endpoint /api/spirits/:id/photo restano disponibili sul server (retrocompat)
+  //     ma il form ora gestisce n-foto via galleria, con uploadPhotosMulti.
+  // Stato della galleria:
+  //   pendingPhotoFiles: File[] locale, non ancora uploadato al server
+  //   existingPhotos:    array di foto già salvate lato server (per "Modifica")
+  //   pendingRemovals:   photoId[] delle foto esistenti marcate per rimozione
+  let pendingPhotoFiles = [];
+  let existingPhotos = [];
+  let pendingRemovals = [];
+  let pendingPhotoUrls = [];
+  let pendingPhotoFile = null;
+  let pendingPhotoUrl = null;
+  let currentPhotoPath = null;
 
-      // resize asincrono, in background
+  function revokePendingPhotoUrls() {
+    for (const u of pendingPhotoUrls) { try { URL.revokeObjectURL(u); } catch (_) {} }
+    pendingPhotoUrls = [];
+  }
+  function clearPhotoGallery() {
+    revokePendingPhotoUrls();
+    pendingPhotoFiles = [];
+    pendingPhotoFile = null;
+    pendingPhotoUrl = null;
+    existingPhotos = [];
+    pendingRemovals = [];
+    currentPhotoPath = null;
+    renderPhotoGallery();
+  }
+  function clearPendingPhoto() { clearPhotoGallery(); }
+
+  function visiblePhotos() {
+    const existing = existingPhotos.filter(p => !pendingRemovals.includes(p.id));
+    return { existing, pending: pendingPhotoFiles.slice() };
+  }
+
+  function pendingPreviewUrl(file) {
+    const u = URL.createObjectURL(file);
+    pendingPhotoUrls.push(u);
+    return u;
+  }
+
+  function renderPhotoGallery() {
+    const root = $('photo-gallery');
+    const counter = $('photo-counter');
+    const list = $('photo-gallery-list');
+    if (!root || !counter || !list) return;
+    const { existing, pending } = visiblePhotos();
+    const total = existing.length + pending.length;
+    if (total === 0) {
+      root.hidden = true;
+      counter.textContent = '';
+      list.innerHTML = '';
+      const rmBtn = $('btn-remove-photo');
+      if (rmBtn) rmBtn.hidden = !(editingId && existingPhotos.length > 0);
+      return;
+    }
+    root.hidden = false;
+    counter.innerHTML = '<span aria-hidden="true">📷</span> <strong>' + total + '</strong> foto';
+    const rmBtn = $('btn-remove-photo');
+    if (rmBtn) rmBtn.hidden = !(editingId && existingPhotos.length > 0);
+
+    let html = '';
+    pending.forEach((f, idx) => {
+      const url = pendingPreviewUrl(f);
+      html += '<div class="photo-thumb" data-pending-idx="' + idx + '">' +
+              '<img src="' + url + '" alt="" />' +
+              '<span class="photo-thumb-badge">nuova</span>' +
+              '<button type="button" class="photo-thumb-remove" data-action="remove-pending" data-idx="' + idx + '" aria-label="Rimuovi foto">✕</button>' +
+              '</div>';
+    });
+    existing.forEach((p) => {
+      const url = p.url || ('/photos/' + encodeURIComponent(p.photo_path));
+      const removedBadge = pendingRemovals.includes(p.id)
+        ? '<span class="photo-thumb-badge" style="background:rgba(185,77,77,0.85)">rimossa</span>'
+        : '';
+      html += '<div class="photo-thumb" data-existing-id="' + p.id + '">' +
+              '<img src="' + url + '" alt="" loading="lazy" />' + removedBadge +
+              '<button type="button" class="photo-thumb-remove" data-action="remove-existing" data-id="' + p.id + '" aria-label="Rimuovi foto dal server">✕</button>' +
+              '</div>';
+    });
+    list.innerHTML = html;
+  }
+
+  async function addPendingFiles(files) {
+    const arr = Array.from(files || []);
+    if (!arr.length) return;
+    for (const f of arr) {
+      if (!f || !f.type || !f.type.startsWith('image/')) continue;
+      pendingPhotoFiles.push(f);
       try {
-        const r = await maybeResizeImage(file);
-        if (r.resized && r.file) {
-          pendingPhotoFile = r.file;
-          if (pendingPhotoUrl) { URL.revokeObjectURL(pendingPhotoUrl); }
-          pendingPhotoUrl = URL.createObjectURL(r.file);
-          $('photo-preview-img').src = pendingPhotoUrl;
-          toast('📦 foto ridotta: ' + fmtBytes(r.origBytes) + ' → ' + fmtBytes(r.newBytes) + ' (' + r.width + '×' + r.height + ')', 'success');
+        const r = await maybeResizeImage(f);
+        if (r.resized) {
+          pendingPhotoFiles[pendingPhotoFiles.length - 1] = r.file;
         }
-      } catch (e) {
-        console.warn('resize fallito:', e);
-      }
+      } catch (e) { console.warn('resize client spirito:', e); }
+    }
+    renderPhotoGallery();
+  }
+
+  function removePendingPhotoAt(idx) {
+    if (idx < 0 || idx >= pendingPhotoFiles.length) return;
+    pendingPhotoFiles.splice(idx, 1);
+    renderPhotoGallery();
+  }
+  function markExistingPhotoRemoved(id) {
+    if (!pendingRemovals.includes(id)) pendingRemovals.push(id);
+    renderPhotoGallery();
+  }
+  function unmarkExistingPhotoRemoved(id) {
+    pendingRemovals = pendingRemovals.filter(x => x !== id);
+    renderPhotoGallery();
+  }
+
+  document.addEventListener('click', (ev) => {
+    const t = ev.target.closest('[data-action]');
+    if (!t) return;
+    const a = t.getAttribute('data-action');
+    if (a === 'remove-pending') {
+      ev.preventDefault();
+      removePendingPhotoAt(parseInt(t.getAttribute('data-idx'), 10));
+    } else if (a === 'remove-existing') {
+      ev.preventDefault();
+      const id = parseInt(t.getAttribute('data-id'), 10);
+      if (pendingRemovals.includes(id)) unmarkExistingPhotoRemoved(id);
+      else markExistingPhotoRemoved(id);
+    }
+  });
+
+  async function fetchSpiritFull(id) { return api('/api/spirits/' + id); }
+
+  function bindPhotoFileInput(input) {
+    input.addEventListener('change', async () => {
+      const fs = input.files ? Array.from(input.files) : [];
+      input.value = '';
+      if (!fs.length) return;
+      await addPendingFiles(fs);
     });
   }
 
-  function uploadPhoto(spiritId, file) {
-    return new Promise((resolve, reject) => {
-      const fd = new FormData();
-      fd.append('photo', file, file.name || 'photo.jpg');
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/spirits/' + spiritId + '/photo');
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try { resolve(JSON.parse(xhr.responseText)); }
-          catch (e) { resolve({ ok: true }); }
-        } else {
-          let msg = 'HTTP ' + xhr.status;
-          try { const o = JSON.parse(xhr.responseText); if (o && o.error) msg = o.error; } catch (_) {}
-          reject(new Error(msg));
-        }
-      };
-      xhr.onerror = () => reject(new Error('network error'));
-      xhr.send(fd);
-    });
+  async function uploadPhotosMulti(spiritId, files) {
+    const fd = new FormData();
+    for (const f of files) fd.append('photos', f, f.name || 'photo.jpg');
+    const r = await fetch('/api/spirits/' + spiritId + '/photos', { method: 'POST', body: fd });
+    let body = null;
+    try { body = await r.json(); } catch (_) { /* ignore */ }
+    if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
+    return body;
   }
+
+  async function deletePhotosMulti(spiritId, photoIds) {
+    const errors = [];
+    for (const id of photoIds) {
+      try {
+        await api('/api/spirits/' + spiritId + '/photos/' + id, { method: 'DELETE' });
+      } catch (e) {
+        errors.push({ id, error: String(e.message || e) });
+      }
+    }
+    return errors;
+  }
+
+  // Bottone "Rimuovi tutte" (visibile solo in edit con foto esistenti): marca
+  // existingPhotos per rimozione; il DELETE avviene al save successivo.
+  $('btn-remove-photo').addEventListener('click', () => {
+    if (!editingId || !existingPhotos.length) return;
+    for (const p of existingPhotos) {
+      if (!pendingRemovals.includes(p.id)) pendingRemovals.push(p.id);
+    }
+    renderPhotoGallery();
+  });
 
   // ---------- form submit ----------
 
@@ -427,66 +554,161 @@
       price: $('spirit-price').value,
     };
 
+    $('save-btn').disabled = true;
     try {
       let id = editingId;
       if (id) {
         await api('/api/spirits/' + id, { method: 'PUT', body: JSON.stringify(payload) });
-        toast('Aggiornato', 'success');
       } else {
         const out = await api('/api/spirits', { method: 'POST', body: JSON.stringify(payload) });
         id = out.id;
-        toast('Alcolico salvato', 'success');
       }
-      if (pendingPhotoFile) {
+      // 1. Cancella le foto esistenti marcate per rimozione
+      let deleteErrors = 0;
+      if (editingId && pendingRemovals.length) {
+        const errs = await deletePhotosMulti(id, pendingRemovals.slice());
+        deleteErrors = errs.length;
+      }
+      // 2. Upload delle nuove pendingPhotoFiles (chunk da 8 per via del limits multer)
+      let uploadErrors = 0;
+      if (pendingPhotoFiles.length) {
         try {
-          await uploadPhoto(id, pendingPhotoFile);
-          toast('Foto caricata', 'success');
+          const chunks = [];
+          for (let i = 0; i < pendingPhotoFiles.length; i += 8) chunks.push(pendingPhotoFiles.slice(i, i + 8));
+          let totalInserted = 0;
+          for (const ch of chunks) {
+            const r = await uploadPhotosMulti(id, ch);
+            totalInserted += (r.inserted || []).length;
+            uploadErrors += (r.errors || []).length;
+          }
+          if (uploadErrors > 0) {
+            toast((editingId ? 'Aggiornato' : 'Salvato') + '; ' + totalInserted + ' foto OK, ' + uploadErrors + ' non caricate', 'error');
+          } else if (deleteErrors > 0) {
+            toast((editingId ? 'Aggiornato' : 'Salvato') + '; ' + deleteErrors + ' foto non rimosse', 'error');
+          } else {
+            toast((editingId ? 'Aggiornato' : 'Salvato') + '; ' + pendingPhotoFiles.length + ' foto caricate', 'success');
+          }
         } catch (e) {
-          toast('Alcolico salvato, ma foto non caricata: ' + e.message, 'error');
+          toast((editingId ? 'Aggiornato' : 'Salvato') + ', ma foto non caricate: ' + e.message, 'error');
         }
+      } else if (deleteErrors > 0) {
+        toast((editingId ? 'Aggiornato' : 'Salvato') + '; ' + deleteErrors + ' foto non rimosse', 'error');
+      } else {
+        toast(editingId ? 'Aggiornato' : 'Alcolico salvato', 'success');
       }
       resetForm();
       loadSpirits();
       loadStores();
     } catch (e) {
       toast('Errore: ' + e.message, 'error');
+    } finally {
+      $('save-btn').disabled = false;
     }
   });
 
   $('cancel-edit-btn').addEventListener('click', () => resetForm());
   $('refresh-btn').addEventListener('click', () => { loadSpirits(); toast('Aggiornato'); });
 
-  // elimina la foto attuale (solo quando editing di un alcolico che già ha foto)
-  $('btn-remove-photo').addEventListener('click', async () => {
-    if (!editingId || !currentPhotoPath) return;
-    const btn = $('btn-remove-photo');
-    const sp = document.createElement('span');
-    sp.style.flexBasis = '100%'; sp.style.height = '0';
-    openConfirmModal(
-      'Rimuovi foto',
-      'Vuoi eliminare la foto attuale di questo alcolico? L’operazione è irreversibile.',
-      async () => {
-        try {
-          await api('/api/spirits/' + editingId + '/photo', { method: 'DELETE' });
-          currentPhotoPath = null;
-          clearPendingPhoto();
-          $('btn-remove-photo').hidden = true;
-          toast('Foto rimossa', 'success');
-          loadSpirits();
-        } catch (e) { toast('Errore: ' + e.message, 'error'); }
-      },
-      btn
-    );
-  });
-
-  // ---------- lightbox foto ----------
+  // ---------- lightbox foto (singola + carousel multi-foto) ----------
 
   let lastImgTrigger = null;
-  function openImageLightbox(src, alt, trigger) {
-    lastImgTrigger = trigger || null;
+
+  function renderCarouselInLightbox(photos) {
     const lb = $('image-lightbox');
+    lb.querySelectorAll('.photo-carousel, .photo-carousel-prev, .photo-carousel-next, .photo-carousel-dots, .photo-carousel-caption').forEach(n => n.remove());
     const img = $('image-lightbox-img');
-    img.src = src; img.alt = alt || '';
+    if (photos.length === 1) {
+      img.src = photos[0].url; img.alt = photos[0].alt || ''; img.style.display = '';
+      return;
+    }
+    img.style.display = 'none';
+    const carousel = document.createElement('div');
+    carousel.className = 'photo-carousel';
+    const track = document.createElement('div');
+    track.className = 'photo-carousel-track';
+    photos.forEach((p, i) => {
+      const slide = document.createElement('div');
+      slide.className = 'photo-carousel-slide';
+      const im = document.createElement('img');
+      im.src = p.url; im.alt = (p.alt || '') + ' (' + (i + 1) + '/' + photos.length + ')';
+      im.draggable = false;
+      slide.appendChild(im); track.appendChild(slide);
+    });
+    carousel.appendChild(track);
+    const prev = document.createElement('button');
+    prev.type = 'button'; prev.className = 'photo-carousel-prev';
+    prev.setAttribute('aria-label', 'Foto precedente'); prev.textContent = '‹';
+    const next = document.createElement('button');
+    next.type = 'button'; next.className = 'photo-carousel-next';
+    next.setAttribute('aria-label', 'Foto successiva'); next.textContent = '›';
+    const dots = document.createElement('div');
+    dots.className = 'photo-carousel-dots';
+    const dotsBtns = photos.map((_, i) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'photo-carousel-dot' + (i === 0 ? ' active' : '');
+      b.setAttribute('aria-label', 'Vai alla foto ' + (i + 1));
+      b.dataset.idx = String(i);
+      dots.appendChild(b);
+      return b;
+    });
+    const cap = document.createElement('div');
+    cap.className = 'photo-carousel-caption';
+    cap.textContent = '1 / ' + photos.length;
+    carousel.appendChild(prev); carousel.appendChild(next); carousel.appendChild(dots);
+    lb.appendChild(carousel); lb.appendChild(cap);
+
+    let idx = 0;
+    function setIdx(n) {
+      idx = Math.max(0, Math.min(photos.length - 1, n));
+      track.scrollTo({ left: idx * track.clientWidth, behavior: 'smooth' });
+      dotsBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
+      cap.textContent = (idx + 1) + ' / ' + photos.length;
+    }
+    prev.addEventListener('click', () => setIdx(idx - 1));
+    next.addEventListener('click', () => setIdx(idx + 1));
+    dotsBtns.forEach(b => b.addEventListener('click', () => setIdx(parseInt(b.dataset.idx, 10))));
+    lb.addEventListener('keydown', lbKeyHandler);
+    let touchStartX = null;
+    track.addEventListener('touchstart', (ev) => {
+      touchStartX = (ev.changedTouches && ev.changedTouches[0] && ev.changedTouches[0].clientX) || null;
+    }, { passive: true });
+    track.addEventListener('touchend', (ev) => {
+      if (touchStartX == null) return;
+      const x = (ev.changedTouches && ev.changedTouches[0] && ev.changedTouches[0].clientX) || touchStartX;
+      const dx = x - touchStartX;
+      if (Math.abs(dx) > 40) setIdx(idx + (dx < 0 ? 1 : -1));
+      touchStartX = null;
+    });
+    let scrollTimeout = null;
+    track.addEventListener('scroll', () => {
+      if (scrollTimeout) clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        const w = track.clientWidth || 1;
+        const newIdx = Math.round(track.scrollLeft / w);
+        if (newIdx !== idx) {
+          idx = newIdx;
+          dotsBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
+          cap.textContent = (idx + 1) + ' / ' + photos.length;
+        }
+      }, 80);
+    });
+    setIdx(0);
+  }
+
+  let lbKeyHandler = (ev) => {
+    if (!$('image-lightbox').classList.contains('open')) return;
+    const carousel = $('image-lightbox').querySelector('.photo-carousel');
+    if (!carousel) return;
+    if (ev.key === 'ArrowLeft')  { ev.preventDefault(); carousel.querySelector('.photo-carousel-prev').click(); }
+    if (ev.key === 'ArrowRight') { ev.preventDefault(); carousel.querySelector('.photo-carousel-next').click(); }
+  };
+
+  function openImageLightbox(src, alt, trigger) { openImageLightboxMulti([{ url: src, alt: alt || '' }], trigger); }
+  function openImageLightboxMulti(photos, trigger) {
+    if (!photos || !photos.length) return;
+    const lb = $('image-lightbox');
+    lastImgTrigger = trigger || null;
+    renderCarouselInLightbox(photos);
     lb.classList.add('open');
     lb.setAttribute('aria-hidden', 'false');
     document.body.style.overflow = 'hidden';
@@ -497,7 +719,8 @@
     const img = $('image-lightbox-img');
     lb.classList.remove('open');
     lb.setAttribute('aria-hidden', 'true');
-    setTimeout(() => { try { img.src = ''; img.alt = ''; } catch (_) {} }, 200);
+    lb.querySelectorAll('.photo-carousel, .photo-carousel-prev, .photo-carousel-next, .photo-carousel-dots, .photo-carousel-caption').forEach(n => n.remove());
+    setTimeout(() => { try { img.src = ''; img.alt = ''; img.style.display = ''; } catch (_) {} }, 200);
     document.body.style.overflow = '';
     if (lastImgTrigger && typeof lastImgTrigger.focus === 'function') {
       try { lastImgTrigger.focus({ preventScroll: true }); } catch (_) { lastImgTrigger.focus(); }
@@ -513,13 +736,28 @@
     if ($('image-lightbox').classList.contains('open')) closeImageLightbox();
     else if ($('confirm-modal').classList.contains('open')) closeConfirmModal();
   });
-  // Click sulla thumb di una card → lightbox
-  document.addEventListener('click', (ev) => {
+  // Click sulla thumb di una card → lightbox (carousel se photo_count > 1)
+  document.addEventListener('click', async (ev) => {
     const img = ev.target.closest('.thumb img');
     if (!img) return;
     const card = img.closest('[data-id]');
     if (!card) return;
+    const id = parseInt(card.dataset.id, 10);
+    if (!Number.isInteger(id)) return;
     ev.preventDefault(); ev.stopPropagation();
+    const pc = Number((card.__wineData && card.__wineData.wine && card.__wineData.wine.photo_count) ||
+                      (card.__spiritData && card.__spiritData.spirit && card.__spiritData.spirit.photo_count) || 0);
+    if (pc > 1) {
+      try {
+        const r = await fetch('/api/spirits/' + id);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const full = await r.json();
+        const photos = (full.photos || []).slice().sort((a, b) => a.position - b.position).map((p, i, arr) => ({
+          url: p.url, alt: (full.name || '') + ' (' + (i + 1) + '/' + arr.length + ')',
+        }));
+        if (photos.length) { openImageLightboxMulti(photos, img); return; }
+      } catch (_) { /* fallback sotto */ }
+    }
     openImageLightbox(img.src, card.dataset.id, img);
   });
 
@@ -561,7 +799,8 @@
   $('btn-take-photo').addEventListener('click', () => $('photo-input-camera').click());
   bindPhotoFileInput($('photo-input-gallery'));
   bindPhotoFileInput($('photo-input-camera'));
-  $('clear-pending-photo').addEventListener('click', clearPendingPhoto);
+  // $('clear-pending-photo') rimosso: la galleria multi-foto gestisce la rimozione
+  // delle pending via pulsante ✕ su ogni thumbnail.
 
   // ---------- service worker: aggiorna app ----------
 

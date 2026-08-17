@@ -87,6 +87,58 @@ async function initDb() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_spirits_rating ON spirits(rating DESC);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_spirits_spirit_type ON spirits(spirit_type);`);
 
+  // Tabella foto multi-per-vino: posizione ordinata per swipe orizzontale, ON DELETE CASCADE
+  // così cancellando un vino sparisce anche ogni sua foto (no orfane).
+  // UNIQUE(wine_id, position) impedisce due foto nella stessa posizione per lo stesso vino.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS wine_photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      wine_id INTEGER NOT NULL,
+      photo_path TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (wine_id) REFERENCES wines(id) ON DELETE CASCADE
+    );
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_wine_photos_wine ON wine_photos(wine_id, position);`);
+  db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_wine_photos_unique_pos ON wine_photos(wine_id, position);`);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS spirit_photos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      spirit_id INTEGER NOT NULL,
+      photo_path TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (spirit_id) REFERENCES spirits(id) ON DELETE CASCADE
+    );
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_spirit_photos_spirit ON spirit_photos(spirit_id, position);`);
+  db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_spirit_photos_unique_pos ON spirit_photos(spirit_id, position);`);
+
+  // Migrazione record pre-multi-photo: chi ha wines.photo_path valorizzato ma
+  // nessuna riga corrispondente in wine_photos riceve una entry in posizione 0.
+  // Lo stesso per gli spirits. Idempotente (usa INSERT OR IGNORE + NOT EXISTS).
+  // colonne photo_path nel parent restano come cache denormalizzata: la prima foto
+  // (position = 0) viene rispecchiata in wines.photo_path / spirits.photo_path via
+  // syncPrimaryPhoto() ogni volta che la galleria cambia.
+  db.run(`
+    INSERT OR IGNORE INTO wine_photos (wine_id, photo_path, position, created_at)
+    SELECT w.id, w.photo_path, 0, COALESCE(w.created_at, datetime('now'))
+      FROM wines w
+     WHERE w.photo_path IS NOT NULL AND w.photo_path <> ''
+       AND NOT EXISTS (SELECT 1 FROM wine_photos wp
+                        WHERE wp.wine_id = w.id AND wp.photo_path = w.photo_path);
+  `);
+  db.run(`
+    INSERT OR IGNORE INTO spirit_photos (spirit_id, photo_path, position, created_at)
+    SELECT s.id, s.photo_path, 0, COALESCE(s.created_at, datetime('now'))
+      FROM spirits s
+     WHERE s.photo_path IS NOT NULL AND s.photo_path <> ''
+       AND NOT EXISTS (SELECT 1 FROM spirit_photos sp
+                        WHERE sp.spirit_id = s.id AND sp.photo_path = s.photo_path);
+  `);
+
   // Migrazione: aggiunge le colonne nuove ai DB creati prima dell'introduzione di wine_type/price.
   // PRAGMA table_info evita di mascherare errori veri con un try/catch sul ALTER TABLE.
   const wineCols = db.exec(`PRAGMA table_info(wines)`);
@@ -212,6 +264,47 @@ async function processPhoto(inputPath, originalName) {
   return { filename, width: img.bitmap.width, height: img.bitmap.height };
 }
 
+// Risincronizza wines.photo_path (denormalized cache) dopo ogni cambio alla galleria:
+// prende la riga wine_photos con position minima (e id minima come tie-breaker) e la
+// copia in wines.photo_path; se la galleria è vuota, la colonna torna NULL. Stessa cosa
+// per spirits. Non usa trigger (sql.js non li supporta in modo affidabile) ma è chiamato
+// da ogni endpoint che modifica wine_photos / spirit_photos, quindi la cache è sempre
+// coerente. NB: usare INSERT/DELETE sulla tabella figlio è sufficiente per invalidarla;
+// non serve toccare la cache "a mano" dal chiamante.
+function syncPrimaryPhoto(parentId, kind) {
+  if (kind === 'wine') {
+    const r = getOne(
+      `SELECT photo_path FROM wine_photos WHERE wine_id=? ORDER BY position ASC, id ASC LIMIT 1`,
+      [parentId]
+    );
+    runSql(`UPDATE wines SET photo_path=? WHERE id=?`, [r ? r.photo_path : null, parentId]);
+  } else if (kind === 'spirit') {
+    const r = getOne(
+      `SELECT photo_path FROM spirit_photos WHERE spirit_id=? ORDER BY position ASC, id ASC LIMIT 1`,
+      [parentId]
+    );
+    runSql(`UPDATE spirits SET photo_path=? WHERE id=?`, [r ? r.photo_path : null, parentId]);
+  }
+}
+
+// Conta attuale delle foto per un dato parent (usato in endpoints GET per allegare il counter).
+function countPhotos(parentId, kind) {
+  if (kind === 'wine') {
+    const r = getOne(`SELECT COUNT(*) AS n FROM wine_photos WHERE wine_id=?`, [parentId]);
+    return r ? r.n : 0;
+  }
+  const r = getOne(`SELECT COUNT(*) AS n FROM spirit_photos WHERE spirit_id=?`, [parentId]);
+  return r ? r.n : 0;
+}
+
+// Cancella in sicurezza un file da PHOTO_DIR (mai lanciare eccezione al chiamante).
+function safeUnlinkPhoto(filename) {
+  if (!filename) return;
+  // basename-only check: niente traversal "../../etc/passwd"
+  if (filename.includes('/') || filename.includes('\\') || filename.startsWith('.')) return;
+  try { fs.unlink(path.join(PHOTO_DIR, filename), () => { /* ignore */ }); } catch (_) { /* ignore */ }
+}
+
 // Restituisce il valore numerico del tag EXIF Orientation (1..8) presente nel JPEG,
 // cercando solo nei primi 64 KB dove risiede l'APP1/EXIF. Nessuna corrispondenza → 1.
 function getJpegExifOrientation(filePath) {
@@ -317,9 +410,13 @@ app.get('/api/wines', (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
   // created_at esiste sia in wines che in stores → va sempre qualificato w.x.
   const sort = req.query.sort === 'rating' ? 'w.rating DESC, w.created_at DESC' : 'w.created_at DESC';
+  // photo_count = numero di foto associate al vino (compresa la primary).
+  // photo_path resta il path della foto primaria (position=0), denormalizzato per leggere
+  // la thumb della lista senza un JOIN per ogni riga.
   const rows = getAll(
     `SELECT w.id, w.name, w.store_id, w.rating, w.note, w.photo_path, w.wine_type, w.price, w.created_at,
-            s.name AS store_name
+            s.name AS store_name,
+            (SELECT COUNT(*) FROM wine_photos wp WHERE wp.wine_id = w.id) AS photo_count
        FROM wines w LEFT JOIN stores s ON s.id = w.store_id
        ORDER BY ${sort}
        LIMIT ?`,
@@ -337,6 +434,15 @@ app.get('/api/wines/:id', (req, res) => {
     [id]
   );
   if (!w) return res.status(404).json({ error: 'vino non trovato' });
+  // Allega la lista completa delle foto al record vino per la lightbox multi-foto.
+  const photos = getAll(
+    `SELECT id, photo_path, position, created_at FROM wine_photos WHERE wine_id=? ORDER BY position ASC, id ASC`,
+    [id]
+  );
+  w.photos = photos.map(p => ({
+    id: p.id, position: p.position, photo_path: p.photo_path,
+    url: `/photos/${p.photo_path}`, created_at: p.created_at,
+  }));
   res.json(w);
 });
 
@@ -418,12 +524,12 @@ app.put('/api/wines/:id', (req, res) => {
 
 app.delete('/api/wines/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const w = getOne(`SELECT photo_path FROM wines WHERE id=?`, [id]);
-  if (w && w.photo_path) {
-    const p = path.join(PHOTO_DIR, w.photo_path);
-    fs.unlink(p, () => { /* ignore */ });
-  }
+  // wine_photos ha ON DELETE CASCADE → le righe figlio spariscono atomicamente.
+  // Dobbiamo però recuperare i photo_path PRIMA del DELETE per poter cancellare i file
+  // fisici in PHOTO_DIR (la CASCADE non tocca il disco).
+  const photos = getAll(`SELECT photo_path FROM wine_photos WHERE wine_id=?`, [id]);
   runSql(`DELETE FROM wines WHERE id=?`, [id]);
+  for (const p of photos) safeUnlinkPhoto(p.photo_path);
   saveDB();
   res.json({ ok: true });
 });
@@ -456,11 +562,120 @@ app.delete('/api/wines/:id/photo', (req, res) => {
   const w = getOne(`SELECT photo_path FROM wines WHERE id=?`, [id]);
   if (!w) return res.status(404).json({ error: 'vino non trovato' });
   if (w.photo_path) {
-    const p = path.join(PHOTO_DIR, w.photo_path);
-    fs.unlink(p, () => { /* ignore */ });
+    safeUnlinkPhoto(w.photo_path);
+    // Retrocompat: cancella anche ogni entry in wine_photos che punta a questo path,
+    // così la cache wines.photo_path torna NULL coerentemente.
+    runSql(`DELETE FROM wine_photos WHERE wine_id=? AND photo_path=?`, [id, w.photo_path]);
     runSql(`UPDATE wines SET photo_path=NULL WHERE id=?`, [id]);
     saveDB();
   }
+  res.json({ ok: true });
+});
+
+// ---------- API vini: galleria multi-foto ----------
+// upload.array accetta fino a 8 file per chiamata (campo "photos"); ogni file passa per
+// processPhoto (resize lato server). Le foto vengono accodate in posizioni successive
+// (max position corrente + 1). L'upload è best-effort: un file fallito non rovina gli
+// altri, ma tutti i filename riusciti vengono inseriti e la cache viene sincronizzata.
+app.post('/api/wines/:id/photos', upload.array('photos', 8), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'id non valido' });
+  const exists = getOne(`SELECT id FROM wines WHERE id=?`, [id]);
+  if (!exists) return res.status(404).json({ error: 'vino non trovato' });
+  if (!req.files || !req.files.length) return res.status(400).json({ error: 'file mancanti (campo "photos")' });
+  try {
+    await ensurePhotoDir();
+    const maxRow = getOne(`SELECT COALESCE(MAX(position), -1) AS m FROM wine_photos WHERE wine_id=?`, [id]);
+    let nextPos = (maxRow && maxRow.m != null) ? maxRow.m + 1 : 0;
+    const inserted = [];
+    const errors = [];
+    for (const f of req.files) {
+      try {
+        const { filename, width, height } = await processPhoto(f.path, f.originalname);
+        // INSERT può collidere con un position già usato se il client ha inserito
+        // buchi manualmente; usiamo INSERT con retry su +1 in caso di conflit UNIQUE.
+        let attempts = 0;
+        while (attempts < 16) {
+          try {
+            const photoId = runSql(
+              `INSERT INTO wine_photos (wine_id, photo_path, position) VALUES (?, ?, ?)`,
+              [id, filename, nextPos]
+            );
+            inserted.push({ id: photoId, filename, position: nextPos, width, height, url: `/photos/${filename}` });
+            nextPos++;
+            break;
+          } catch (e) {
+            if (/UNIQUE/i.test(String(e.message || e))) { nextPos++; attempts++; continue; }
+            throw e;
+          }
+        }
+      } catch (e) {
+        errors.push({ originalname: f.originalname, error: String(e.message || e) });
+        safeUnlinkPhoto(f.path && path.basename(f.path));
+      }
+    }
+    syncPrimaryPhoto(id, 'wine');
+    saveDB();
+    res.json({ ok: true, inserted, errors });
+  } catch (e) {
+    res.status(500).json({ error: 'errore elaborazione foto: ' + (e.message || e) });
+  }
+});
+
+app.delete('/api/wines/:id/photos/:photoId', (req, res) => {
+  const parentId = parseInt(req.params.id, 10);
+  const photoId = parseInt(req.params.photoId, 10);
+  if (!Number.isInteger(parentId) || !Number.isInteger(photoId)) return res.status(400).json({ error: 'id non valido' });
+  const photo = getOne(`SELECT id, photo_path FROM wine_photos WHERE id=? AND wine_id=?`, [photoId, parentId]);
+  if (!photo) return res.status(404).json({ error: 'foto non trovata' });
+  runSql(`DELETE FROM wine_photos WHERE id=?`, [photoId]);
+  syncPrimaryPhoto(parentId, 'wine');
+  safeUnlinkPhoto(photo.photo_path);
+  saveDB();
+  res.json({ ok: true });
+});
+
+// Setta una foto come "primary" (position = 0). Le altre scivolano in pos+1.
+// NB: per evitare conflitti UNIQUE, prima spostiamo tutte le +1 in una transazione
+// concettuale (sql.js non ha BEGIN espliciti ma ogni db.run è atomico, quindi iteriamo).
+app.post('/api/wines/:id/photos/:photoId/primary', (req, res) => {
+  const parentId = parseInt(req.params.id, 10);
+  const photoId = parseInt(req.params.photoId, 10);
+  if (!Number.isInteger(parentId) || !Number.isInteger(photoId)) return res.status(400).json({ error: 'id non valido' });
+  const photo = getOne(`SELECT id, position FROM wine_photos WHERE id=? AND wine_id=?`, [photoId, parentId]);
+  if (!photo) return res.status(404).json({ error: 'foto non trovata' });
+  // Sposta tutti in pos+1 per liberare lo slot 0
+  const all = getAll(`SELECT id FROM wine_photos WHERE wine_id=? AND id<>? ORDER BY position DESC, id DESC`, [parentId, photoId]);
+  for (const r of all) {
+    runSql(`UPDATE wine_photos SET position = position + 1 WHERE id=?`, [r.id]);
+  }
+  runSql(`UPDATE wine_photos SET position=0 WHERE id=?`, [photoId]);
+  syncPrimaryPhoto(parentId, 'wine');
+  saveDB();
+  res.json({ ok: true });
+});
+
+// Reorder atomico: body = [{ id, position }, ...]. Riassegna position evitando i conflitti
+// UNIQUE facendo due passate (prima tutti a pos negative, poi tutti a pos finali).
+app.post('/api/wines/:id/photos/reorder', (req, res) => {
+  const parentId = parseInt(req.params.id, 10);
+  const order = Array.isArray(req.body && req.body.order) ? req.body.order : null;
+  if (!order) return res.status(400).json({ error: 'body.order[] richiesto' });
+  const existing = getAll(`SELECT id FROM wine_photos WHERE wine_id=?`, [parentId]).map(r => r.id);
+  const incomingIds = order.map(o => parseInt(o.id, 10)).filter(Number.isInteger);
+  if (incomingIds.length !== order.length) return res.status(400).json({ error: 'id non validi in order[]' });
+  if (incomingIds.some(id => !existing.includes(id))) return res.status(400).json({ error: 'id non appartenenti al vino' });
+  if (incomingIds.length !== new Set(incomingIds).size) return res.status(400).json({ error: 'id duplicati in order[]' });
+  // Passata 1: posizioni negative temporanee per evitare collisioni UNIQUE
+  for (let i = 0; i < incomingIds.length; i++) {
+    runSql(`UPDATE wine_photos SET position=? WHERE id=?`, [-1 - i, incomingIds[i]]);
+  }
+  // Passata 2: posizioni finali 0..N
+  for (let i = 0; i < incomingIds.length; i++) {
+    runSql(`UPDATE wine_photos SET position=? WHERE id=?`, [i, incomingIds[i]]);
+  }
+  syncPrimaryPhoto(parentId, 'wine');
+  saveDB();
   res.json({ ok: true });
 });
 
@@ -489,7 +704,8 @@ app.get('/api/spirits', (req, res) => {
   const sort = req.query.sort === 'rating' ? 's.rating DESC, s.created_at DESC' : 's.created_at DESC';
   const rows = getAll(
     `SELECT s.id, s.name, s.store_id, s.rating, s.note, s.photo_path, s.spirit_type, s.abv, s.price, s.created_at,
-            st.name AS store_name
+            st.name AS store_name,
+            (SELECT COUNT(*) FROM spirit_photos sp WHERE sp.spirit_id = s.id) AS photo_count
        FROM spirits s LEFT JOIN stores st ON st.id = s.store_id
        ORDER BY ${sort}
        LIMIT ?`,
@@ -507,6 +723,14 @@ app.get('/api/spirits/:id', (req, res) => {
     [id]
   );
   if (!s) return res.status(404).json({ error: 'superalcolico non trovato' });
+  const photos = getAll(
+    `SELECT id, photo_path, position, created_at FROM spirit_photos WHERE spirit_id=? ORDER BY position ASC, id ASC`,
+    [id]
+  );
+  s.photos = photos.map(p => ({
+    id: p.id, position: p.position, photo_path: p.photo_path,
+    url: `/photos/${p.photo_path}`, created_at: p.created_at,
+  }));
   res.json(s);
 });
 
@@ -580,12 +804,9 @@ app.put('/api/spirits/:id', (req, res) => {
 
 app.delete('/api/spirits/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const s = getOne(`SELECT photo_path FROM spirits WHERE id=?`, [id]);
-  if (s && s.photo_path) {
-    const p = path.join(PHOTO_DIR, s.photo_path);
-    fs.unlink(p, () => { /* ignore */ });
-  }
+  const photos = getAll(`SELECT photo_path FROM spirit_photos WHERE spirit_id=?`, [id]);
   runSql(`DELETE FROM spirits WHERE id=?`, [id]);
+  for (const p of photos) safeUnlinkPhoto(p.photo_path);
   saveDB();
   res.json({ ok: true });
 });
@@ -617,11 +838,107 @@ app.delete('/api/spirits/:id/photo', (req, res) => {
   const s = getOne(`SELECT photo_path FROM spirits WHERE id=?`, [id]);
   if (!s) return res.status(404).json({ error: 'superalcolico non trovato' });
   if (s.photo_path) {
-    const p = path.join(PHOTO_DIR, s.photo_path);
-    fs.unlink(p, () => { /* ignore */ });
+    safeUnlinkPhoto(s.photo_path);
+    runSql(`DELETE FROM spirit_photos WHERE spirit_id=? AND photo_path=?`, [id, s.photo_path]);
     runSql(`UPDATE spirits SET photo_path=NULL WHERE id=?`, [id]);
     saveDB();
   }
+  res.json({ ok: true });
+});
+
+// ---------- API spirits: galleria multi-foto ----------
+// Stesse convenzioni dei vini: upload multiplo (max 8/richiesta), delete singolo, primary
+// swap, reorder atomico in due passate (posizioni negative → posizioni finali) per
+// evitare conflitti UNIQUE. La cache spirits.photo_path viene risincronizzata ogni volta.
+app.post('/api/spirits/:id/photos', upload.array('photos', 8), async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'id non valido' });
+  const exists = getOne(`SELECT id FROM spirits WHERE id=?`, [id]);
+  if (!exists) return res.status(404).json({ error: 'superalcolico non trovato' });
+  if (!req.files || !req.files.length) return res.status(400).json({ error: 'file mancanti (campo "photos")' });
+  try {
+    await ensurePhotoDir();
+    const maxRow = getOne(`SELECT COALESCE(MAX(position), -1) AS m FROM spirit_photos WHERE spirit_id=?`, [id]);
+    let nextPos = (maxRow && maxRow.m != null) ? maxRow.m + 1 : 0;
+    const inserted = [];
+    const errors = [];
+    for (const f of req.files) {
+      try {
+        const { filename, width, height } = await processPhoto(f.path, f.originalname);
+        let attempts = 0;
+        while (attempts < 16) {
+          try {
+            const photoId = runSql(
+              `INSERT INTO spirit_photos (spirit_id, photo_path, position) VALUES (?, ?, ?)`,
+              [id, filename, nextPos]
+            );
+            inserted.push({ id: photoId, filename, position: nextPos, width, height, url: `/photos/${filename}` });
+            nextPos++;
+            break;
+          } catch (e) {
+            if (/UNIQUE/i.test(String(e.message || e))) { nextPos++; attempts++; continue; }
+            throw e;
+          }
+        }
+      } catch (e) {
+        errors.push({ originalname: f.originalname, error: String(e.message || e) });
+        safeUnlinkPhoto(f.path && path.basename(f.path));
+      }
+    }
+    syncPrimaryPhoto(id, 'spirit');
+    saveDB();
+    res.json({ ok: true, inserted, errors });
+  } catch (e) {
+    res.status(500).json({ error: 'errore elaborazione foto: ' + (e.message || e) });
+  }
+});
+
+app.delete('/api/spirits/:id/photos/:photoId', (req, res) => {
+  const parentId = parseInt(req.params.id, 10);
+  const photoId = parseInt(req.params.photoId, 10);
+  if (!Number.isInteger(parentId) || !Number.isInteger(photoId)) return res.status(400).json({ error: 'id non valido' });
+  const photo = getOne(`SELECT id, photo_path FROM spirit_photos WHERE id=? AND spirit_id=?`, [photoId, parentId]);
+  if (!photo) return res.status(404).json({ error: 'foto non trovata' });
+  runSql(`DELETE FROM spirit_photos WHERE id=?`, [photoId]);
+  syncPrimaryPhoto(parentId, 'spirit');
+  safeUnlinkPhoto(photo.photo_path);
+  saveDB();
+  res.json({ ok: true });
+});
+
+app.post('/api/spirits/:id/photos/:photoId/primary', (req, res) => {
+  const parentId = parseInt(req.params.id, 10);
+  const photoId = parseInt(req.params.photoId, 10);
+  if (!Number.isInteger(parentId) || !Number.isInteger(photoId)) return res.status(400).json({ error: 'id non valido' });
+  const photo = getOne(`SELECT id, position FROM spirit_photos WHERE id=? AND spirit_id=?`, [photoId, parentId]);
+  if (!photo) return res.status(404).json({ error: 'foto non trovata' });
+  const all = getAll(`SELECT id FROM spirit_photos WHERE spirit_id=? AND id<>? ORDER BY position DESC, id DESC`, [parentId, photoId]);
+  for (const r of all) {
+    runSql(`UPDATE spirit_photos SET position = position + 1 WHERE id=?`, [r.id]);
+  }
+  runSql(`UPDATE spirit_photos SET position=0 WHERE id=?`, [photoId]);
+  syncPrimaryPhoto(parentId, 'spirit');
+  saveDB();
+  res.json({ ok: true });
+});
+
+app.post('/api/spirits/:id/photos/reorder', (req, res) => {
+  const parentId = parseInt(req.params.id, 10);
+  const order = Array.isArray(req.body && req.body.order) ? req.body.order : null;
+  if (!order) return res.status(400).json({ error: 'body.order[] richiesto' });
+  const existing = getAll(`SELECT id FROM spirit_photos WHERE spirit_id=?`, [parentId]).map(r => r.id);
+  const incomingIds = order.map(o => parseInt(o.id, 10)).filter(Number.isInteger);
+  if (incomingIds.length !== order.length) return res.status(400).json({ error: 'id non validi in order[]' });
+  if (incomingIds.some(id => !existing.includes(id))) return res.status(400).json({ error: 'id non appartenenti al superalcolico' });
+  if (incomingIds.length !== new Set(incomingIds).size) return res.status(400).json({ error: 'id duplicati in order[]' });
+  for (let i = 0; i < incomingIds.length; i++) {
+    runSql(`UPDATE spirit_photos SET position=? WHERE id=?`, [-1 - i, incomingIds[i]]);
+  }
+  for (let i = 0; i < incomingIds.length; i++) {
+    runSql(`UPDATE spirit_photos SET position=? WHERE id=?`, [i, incomingIds[i]]);
+  }
+  syncPrimaryPhoto(parentId, 'spirit');
+  saveDB();
   res.json({ ok: true });
 });
 
@@ -677,7 +994,8 @@ app.get('/api/stats', (req, res) => {
   const avgRating = getOne(`SELECT AVG(rating) AS avg_rating FROM wines`) || { avg_rating: null };
 
   const topWines = getAll(
-    `SELECT w.id, w.name, w.rating, s.name AS store_name
+    `SELECT w.id, w.name, w.rating, s.name AS store_name,
+            (SELECT COUNT(*) FROM wine_photos wp WHERE wp.wine_id = w.id) AS photo_count
        FROM wines w LEFT JOIN stores s ON s.id = w.store_id
        ORDER BY w.rating DESC, w.created_at DESC
        LIMIT 5`
@@ -691,7 +1009,8 @@ app.get('/api/stats', (req, res) => {
   // photo_path, wine_type, note e created_at completo.
   const allWines = getAll(
     `SELECT w.id, w.name, w.store_id, w.rating, w.note, w.photo_path, w.wine_type, w.price,
-            w.created_at
+            w.created_at,
+            (SELECT COUNT(*) FROM wine_photos wp WHERE wp.wine_id = w.id) AS photo_count
        FROM wines w
        ORDER BY w.created_at DESC`
   );
@@ -738,6 +1057,7 @@ app.get('/api/stats', (req, res) => {
       photo_path: w.photo_path,
       wine_type: w.wine_type,
       created_at: w.created_at,
+      photo_count: w.photo_count,
     });
   }
   const byStore = Array.from(byStoreMap.values()).map(s => {
@@ -765,7 +1085,8 @@ app.get('/api/stats', (req, res) => {
   );
   const recent = getAll(
     `SELECT w.id, w.name, w.rating, w.created_at, w.photo_path, w.wine_type, w.price,
-            s.name AS store_name
+            s.name AS store_name,
+            (SELECT COUNT(*) FROM wine_photos wp WHERE wp.wine_id = w.id) AS photo_count
        FROM wines w LEFT JOIN stores s ON s.id = w.store_id
        ORDER BY w.created_at DESC
        LIMIT 10`
@@ -796,7 +1117,8 @@ app.get('/api/spirits-stats', (req, res) => {
   const avgRating = getOne(`SELECT AVG(rating) AS avg_rating FROM spirits`) || { avg_rating: null };
 
   const topSpirits = getAll(
-    `SELECT s.id, s.name, s.rating, st.name AS store_name
+    `SELECT s.id, s.name, s.rating, st.name AS store_name,
+            (SELECT COUNT(*) FROM spirit_photos sp WHERE sp.spirit_id = s.id) AS photo_count
        FROM spirits s LEFT JOIN stores st ON st.id = s.store_id
        ORDER BY s.rating DESC, s.created_at DESC
        LIMIT 5`
@@ -804,7 +1126,8 @@ app.get('/api/spirits-stats', (req, res) => {
 
   const allSpirits = getAll(
     `SELECT s.id, s.name, s.store_id, s.rating, s.note, s.photo_path, s.spirit_type, s.abv, s.price,
-            s.created_at
+            s.created_at,
+            (SELECT COUNT(*) FROM spirit_photos sp WHERE sp.spirit_id = s.id) AS photo_count
        FROM spirits s
        ORDER BY s.created_at DESC`
   );
@@ -850,7 +1173,7 @@ app.get('/api/spirits-stats', (req, res) => {
     tt.wines.push({
       id: s.id, name: s.name, rating: s.rating, price: s.price, note: s.note,
       photo_path: s.photo_path, spirit_type: s.spirit_type, abv: s.abv,
-      created_at: s.created_at,
+      created_at: s.created_at, photo_count: s.photo_count,
     });
   }
 
@@ -890,7 +1213,8 @@ app.get('/api/spirits-stats', (req, res) => {
   );
   const recent = getAll(
     `SELECT s.id, s.name, s.rating, s.created_at, s.photo_path, s.spirit_type, s.abv, s.price,
-            st.name AS store_name
+            st.name AS store_name,
+            (SELECT COUNT(*) FROM spirit_photos sp WHERE sp.spirit_id = s.id) AS photo_count
        FROM spirits s LEFT JOIN stores st ON st.id = s.store_id
        ORDER BY s.created_at DESC
        LIMIT 10`
@@ -1076,7 +1400,7 @@ app.get('/api/export/wines.csv', (req, res) => {
 //   MANIFEST.json         — { schema_version, generated_at, wine_count, photo_count }
 // Limiti pratici: bufferizzato interamente in memoria (Zip.toBuffer) → per centinaia di record
 // con foto è tipicamente 5-50 MB, ben sotto i 256 MB di mem_limit del container.
-const BACKUP_SCHEMA_VERSION = 2;
+const BACKUP_SCHEMA_VERSION = 3;
 
 app.get('/api/backup', async (req, res) => {
   try {
@@ -1109,6 +1433,25 @@ app.get('/api/backup', async (req, res) => {
     }
     const spiritCsvText = '\ufeff' + spiritLines.join('\n');
 
+    // ---- wine_photos.csv (galleria vini; id,wine_id,position,photo_path,created_at) ----
+    const winePhotos = getAll(
+      `SELECT id, wine_id, position, photo_path, created_at FROM wine_photos ORDER BY wine_id ASC, position ASC, id ASC`
+    );
+    const winePhotoLines = ['id;wine_id;position;photo_path;created_at'];
+    for (const p of winePhotos) {
+      winePhotoLines.push([p.id, p.wine_id, p.position, p.photo_path, p.created_at || ''].map(csvEscape).join(';'));
+    }
+    const winePhotosCsvText = '\ufeff' + winePhotoLines.join('\n');
+    // ---- spirit_photos.csv (galleria spirits) ----
+    const spiritPhotos = getAll(
+      `SELECT id, spirit_id, position, photo_path, created_at FROM spirit_photos ORDER BY spirit_id ASC, position ASC, id ASC`
+    );
+    const spiritPhotoLines = ['id;spirit_id;position;photo_path;created_at'];
+    for (const p of spiritPhotos) {
+      spiritPhotoLines.push([p.id, p.spirit_id, p.position, p.photo_path, p.created_at || ''].map(csvEscape).join(';'));
+    }
+    const spiritPhotosCsvText = '\ufeff' + spiritPhotoLines.join('\n');
+
     let photoCount = 0;
     const photoFiles = [];
     if (fs.existsSync(PHOTO_DIR)) {
@@ -1126,6 +1469,8 @@ app.get('/api/backup', async (req, res) => {
       app: 'vini-pwa',
       wine_count: wineRows.length,
       spirit_count: spiritRows.length,
+      wine_photo_count: winePhotos.length,
+      spirit_photo_count: spiritPhotos.length,
       photo_count: photoCount,
     };
 
@@ -1133,6 +1478,8 @@ app.get('/api/backup', async (req, res) => {
     zip.addFile('MANIFEST.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'));
     zip.addFile('wines.csv', Buffer.from(wineCsvText, 'utf8'));
     zip.addFile('spirits.csv', Buffer.from(spiritCsvText, 'utf8'));
+    zip.addFile('wine_photos.csv', Buffer.from(winePhotosCsvText, 'utf8'));
+    zip.addFile('spirit_photos.csv', Buffer.from(spiritPhotosCsvText, 'utf8'));
     for (const fullPath of photoFiles) {
       // addLocalFile(preferDot:true)␤place at "photos/&lt;basename&gt;". Niente path traversal: il basename
       // proviene da fs.readdirSync della nostra directory di lavoro.
@@ -1175,9 +1522,10 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
   }
   try { fs.unlinkSync(req.file.path); } catch (_) { /* best-effort cleanup */ }
 
-  // Validazione: MANIFEST.json deve esistere e avere schema_version=1 oppure 2.
+  // Validazione: MANIFEST.json deve esistere e avere schema_version=1, 2 oppure 3.
   //   1 = solo vini (legacy)
-  //   2 = vini + alcolici (corrente)
+  //   2 = vini + alcolici (senza galleries separate)
+  //   3 = corrente, include anche le galleries (wine_photos / spirit_photos)
   const manifestEntry = zip.getEntry('MANIFEST.json');
   if (!manifestEntry) return res.status(400).json({ error: 'MANIFEST.json mancante (non è un backup valido)' });
   let manifest;
@@ -1187,10 +1535,10 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
     return res.status(400).json({ error: 'MANIFEST.json non parsabile' });
   }
   const schemaVer = Number(manifest.schema_version);
-  if (schemaVer !== 1 && schemaVer !== 2) {
+  if (schemaVer !== 1 && schemaVer !== 2 && schemaVer !== 3) {
     return res.status(400).json({ error: 'schema_version non supportato: ' + manifest.schema_version });
   }
-  const includeSpirits = (schemaVer === 2) && (zip.getEntry('spirits.csv') != null);
+  const includeSpirits = (schemaVer >= 2) && (zip.getEntry('spirits.csv') != null);
 
   const csvEntry = zip.getEntry('wines.csv');
   if (!csvEntry) return res.status(400).json({ error: 'wines.csv mancante nel backup' });
@@ -1220,8 +1568,15 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
     await ensurePhotoDir();
     db.run('BEGIN');
 
-    // 1. Svuota DB.
+    // 1. Svuota DB. Ordine importante a causa dei vincoli FK:
+    //    ultime le tabelle padre (wines, spirits, stores). Nota: ON DELETE CASCADE sulle
+    //    tabelle figlio (wine_photos / spirit_photos) dovrebbe già svuotarle, ma le
+    //    cancelliamo esplicitamente per chiarezza e per gestire anche backup v1/v2 dove
+    //    queste tabelle sono vuote da subito.
+    db.run('DELETE FROM wine_photos');
+    db.run('DELETE FROM spirit_photos');
     db.run('DELETE FROM wines');
+    db.run('DELETE FROM spirits');
     db.run('DELETE FROM stores');
 
     // 2. Svuota /photos (best-effort: ignora singoli file mancanti o locked).
@@ -1382,6 +1737,99 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
     // 4. Scrivi le foto: solo quelle effettivamente referenziate dal CSV (evita di
     //    spargere file orfani che farebbero solo peso). Estrai ogni entries/photos/<file>.
     let photoWritten = 0, photoSkipped = 0;
+
+    // 3c. (solo backup v3) Importa anche le galleries multi-foto. wine_photos.csv e
+    //     spirit_photos.csv hanno lo stesso schema: id;parent_id;position;photo_path;created_at
+    //     Ogni photo_path viene aggiunto al set per essere poi scritto su disco insieme
+    //     alle foto "primary" (quelle referenziate anche dai wines.csv / spirits.csv).
+    let winePhotosRestored = 0, winePhotoErrors = 0;
+    if (schemaVer === 3 && zip.getEntry('wine_photos.csv')) {
+      const wpcText = zip.getEntry('wine_photos.csv').getData().toString('utf8');
+      const wpRows = parseCsv(wpcText).filter(r => r.some(c => (c || '').trim() !== ''));
+      if (wpRows.length > 1) {
+        const wpHeader = (wpRows[0] || []).map(h => (h || '').toLowerCase().trim());
+        const wpIdx = {
+          id: wpHeader.indexOf('id'),
+          wine_id: wpHeader.indexOf('wine_id'),
+          position: wpHeader.indexOf('position'),
+          photo_path: wpHeader.indexOf('photo_path'),
+          created_at: wpHeader.indexOf('created_at'),
+        };
+        if (wpIdx.wine_id < 0 || wpIdx.position < 0 || wpIdx.photo_path < 0) {
+          db.run('ROLLBACK');
+          return res.status(400).json({ error: 'colonne "wine_id"/"position"/"photo_path" mancanti in wine_photos.csv' });
+        }
+        for (let i = 1; i < wpRows.length; i++) {
+          const row = wpRows[i] || [];
+          const wineId = parseInt((row[wpIdx.wine_id] || '').trim(), 10);
+          const position = parseInt((row[wpIdx.position] || '').trim(), 10);
+          const photoPath = (row[wpIdx.photo_path] || '').trim();
+          if (!Number.isInteger(wineId) || !Number.isInteger(position) || !photoPath) { winePhotoErrors++; continue; }
+          try {
+            db.run(
+              `INSERT INTO wine_photos (wine_id, position, photo_path) VALUES (?, ?, ?)`,
+              [wineId, position, photoPath]
+            );
+            photoSet.add(photoPath);
+            winePhotosRestored++;
+          } catch (e) {
+            // tipicamente UNIQUE(wine_id, position) o vino inesistente. Skip morbido.
+            winePhotoErrors++;
+          }
+        }
+      }
+    }
+    let spiritPhotosRestored = 0, spiritPhotoErrors = 0;
+    if (schemaVer === 3 && zip.getEntry('spirit_photos.csv')) {
+      const spcText = zip.getEntry('spirit_photos.csv').getData().toString('utf8');
+      const spRows = parseCsv(spcText).filter(r => r.some(c => (c || '').trim() !== ''));
+      if (spRows.length > 1) {
+        const spHeader = (spRows[0] || []).map(h => (h || '').toLowerCase().trim());
+        const spIdx = {
+          id: spHeader.indexOf('id'),
+          spirit_id: spHeader.indexOf('spirit_id'),
+          position: spHeader.indexOf('position'),
+          photo_path: spHeader.indexOf('photo_path'),
+          created_at: spHeader.indexOf('created_at'),
+        };
+        if (spIdx.spirit_id < 0 || spIdx.position < 0 || spIdx.photo_path < 0) {
+          db.run('ROLLBACK');
+          return res.status(400).json({ error: 'colonne "spirit_id"/"position"/"photo_path" mancanti in spirit_photos.csv' });
+        }
+        for (let i = 1; i < spRows.length; i++) {
+          const row = spRows[i] || [];
+          const spiritId = parseInt((row[spIdx.spirit_id] || '').trim(), 10);
+          const position = parseInt((row[spIdx.position] || '').trim(), 10);
+          const photoPath = (row[spIdx.photo_path] || '').trim();
+          if (!Number.isInteger(spiritId) || !Number.isInteger(position) || !photoPath) { spiritPhotoErrors++; continue; }
+          try {
+            db.run(
+              `INSERT INTO spirit_photos (spirit_id, position, photo_path) VALUES (?, ?, ?)`,
+              [spiritId, position, photoPath]
+            );
+            photoSet.add(photoPath);
+            spiritPhotosRestored++;
+          } catch (e) {
+            spiritPhotoErrors++;
+          }
+        }
+      }
+    }
+    // Risincronizza la cache denormalized photo_path nei record parent: la foto "primary"
+    // è quella con position minima. Se nessuna gallery è ripristinata (backup v1/v2),
+    // la cache resta il photo_path dichiarato in wines.csv / spirits.csv.
+    db.run(`
+      UPDATE wines SET photo_path = COALESCE(
+        (SELECT photo_path FROM wine_photos WHERE wine_id = wines.id ORDER BY position ASC, id ASC LIMIT 1),
+        photo_path
+      )
+    `);
+    db.run(`
+      UPDATE spirits SET photo_path = COALESCE(
+        (SELECT photo_path FROM spirit_photos WHERE spirit_id = spirits.id ORDER BY position ASC, id ASC LIMIT 1),
+        photo_path
+      )
+    `);
     const photoEntries = zip.getEntries().filter(e =>
       e.entryName.startsWith('photos/') &&
       !e.isDirectory &&
@@ -1409,8 +1857,12 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
       schema_version: schemaVer,
       wines: restored,
       spirits: spiritsRestored,
+      wine_photos: winePhotosRestored,
+      spirit_photos: spiritPhotosRestored,
       wine_errors: errors,
       spirit_errors: spiritsErrors,
+      wine_photo_errors: winePhotoErrors,
+      spirit_photo_errors: spiritPhotoErrors,
       photos_written: photoWritten,
       photos_skipped: photoSkipped,
     });

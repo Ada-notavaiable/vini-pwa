@@ -28,6 +28,13 @@
     return body;
   }
 
+  // GET dettaglio vino (incluso photos[]). Usato da beginEdit per caricare la
+  // galleria delle foto esistenti nella form. Non solleva errore se fallisce:
+  // il chiamante decide come degradare (es. mostra solo la primary photo_path).
+  async function fetchWineFull(id) {
+    return api('/api/wines/' + id);
+  }
+
   function fmtStarsReadonly(rating) {
     // mini-stelle per la card
     let html = '<div class="stars stars-readonly compact" aria-label="voto ' + rating + ' su 10">';
@@ -62,9 +69,9 @@
   // ---------- stato ----------
 
   let editingId = null;
-  let currentPhotoPath = null;
-  let pendingPhotoFile = null;     // File scelto/scattato ma non ancora uploadato
-  let pendingPhotoUrl = null;      // ObjectURL associato al File (per revocarlo)
+  // Dichiarazioni foto (pendingPhotoFiles, existingPhotos, pendingRemovals,
+  // pendingPhotoUrls, pendingPhotoFile/Url legacy, currentPhotoPath) sono definite
+  // più sotto nella sezione "galleria foto (multi-foto per vino)".
   let deferredInstallPrompt = null;
 
   // Soglie per il resize lato client PRIMA dell'upload.
@@ -171,10 +178,15 @@
       const thumbH = w.photo_path
         ? '<img src="/photos/' + encodeURIComponent(w.photo_path) + '" alt="" loading="lazy" />'
         : '🍷';
+      // Badge "📷 N" se il vino ha più di 1 foto (galleria scorrevole nel lightbox)
+      const badgeH = (Number(w.photo_count) > 1)
+        ? '<div class="thumb-photo-counter" aria-label="' + w.photo_count + ' foto">' +
+            '<span aria-hidden="true">📷</span>' + w.photo_count + '</div>'
+        : '';
 
       card.innerHTML = `
         <button type="button" class="wine-delete-btn" aria-label="Elimina vino" title="Elimina">🗑</button>
-        <div class="thumb">${thumbH}</div>
+        <div class="thumb">${thumbH}${badgeH}</div>
         <div class="meta">
           <div class="name">${escapeHtml(w.name)}${wineTypeBadge(w.wine_type)}</div>
           <div class="store">${escapeHtml(w.store_name || '— senza negozio —')}</div>
@@ -216,13 +228,8 @@
   }
 
   // ---------- form logic ----------
-
-  function clearPendingPhoto() {
-    if (pendingPhotoUrl) { URL.revokeObjectURL(pendingPhotoUrl); pendingPhotoUrl = null; }
-    pendingPhotoFile = null;
-    $('photo-preview').hidden = true;
-    $('photo-preview-img').src = '';
-  }
+  // clearPendingPhoto() è ridefinito nella sezione "galleria foto" come wrapper
+  // attorno a clearPhotoGallery() per la retrocompatibilità del codice legacy.
 
   function resetForm() {
     editingId = null;
@@ -257,12 +264,23 @@
     const wT = (w.wine_type === 'bianco' || w.wine_type === 'rosso') ? w.wine_type : '';
     document.querySelectorAll('input[name="wine_type"]').forEach(r => { r.checked = (r.value === wT); });
     $('wine-price').value = (w.price != null && Number.isFinite(Number(w.price))) ? String(w.price) : '';
-    if (w.photo_path) {
-      $('photo-preview').hidden = false;
-      $('photo-preview-img').src = '/photos/' + encodeURIComponent(w.photo_path);
-    } else {
-      clearPendingPhoto();
-    }
+    // Pulisci la galleria pending e poi carica le foto esistenti del vino.
+    pendingPhotoFiles = [];
+    revokePendingPhotoUrls();
+    pendingRemovals = [];
+    existingPhotos = [];
+    pendingPhotoFile = null;
+    pendingPhotoUrl = null;
+    // Fetch i dettagli completi (incluso photos[]) per la galleria form.
+    fetchWineFull(w.id).then(full => {
+      existingPhotos = (full.photos || []).slice();
+      currentPhotoPath = full.photo_path || null;
+      renderPhotoGallery();
+    }).catch(() => {
+      // fallback: se il fetch fallisce, usa il photo_path minimo che abbiamo già nella card
+      renderPhotoGallery();
+    });
+    renderPhotoGallery();
     $('form-title').textContent = 'Modifica: ' + (w.name || '');
     $('save-btn').textContent = 'Aggiorna';
     $('cancel-edit-btn').hidden = false;
@@ -271,7 +289,147 @@
     syncRadioPills && syncRadioPills('wine_type');
   }
 
-  // ---------- photo input (Scegli foto + Scatta foto) ----------
+  // ---------- galleria foto (multi-foto per vino) ----------
+  // Stato della galleria del form:
+  //   pendingPhotoFiles: File[] locale, non ancora uploadato al server (per "Aggiungi")
+  //   existingPhotos:    array di foto già salvate lato server (per "Modifica"):
+  //                       [{ id, photo_path, url, position }]. Rimosse tramite
+  //                       pendingRemovals[] per poter annullare l'edit prima del save.
+  //   pendingRemovals:   photoId[] delle foto esistenti che l'utente ha chiesto di
+  //                       cancellare; verranno inviate via DELETE al save.
+  // NB: pendingPhotoFile e currentPhotoPath erano i nomi legacy (singola foto).
+  //     Rimangono come alias locali (currentPhotoPath, pendingPhotoFile) ma il resto
+  //     del codice usa le strutture nuove. clearPendingPhoto() è il solo riferimento
+  //     residuo e lo lasciamo come wrapper a clearPhotoGallery().
+  let pendingPhotoFiles = [];
+  let existingPhotos = [];
+  let pendingRemovals = [];
+  let pendingPhotoUrls = [];  // blob URL delle pendingPhotoFiles; revocati al reset/replace
+  // legacy aliases (per retrofit minimo con codice esistente)
+  let pendingPhotoFile = null;
+  let pendingPhotoUrl = null;
+  let currentPhotoPath = null;
+
+  function revokePendingPhotoUrls() {
+    for (const u of pendingPhotoUrls) { try { URL.revokeObjectURL(u); } catch (_) {} }
+    pendingPhotoUrls = [];
+  }
+  function clearPhotoGallery() {
+    revokePendingPhotoUrls();
+    pendingPhotoFiles = [];
+    pendingPhotoFile = null;
+    pendingPhotoUrl = null;
+    existingPhotos = [];
+    pendingRemovals = [];
+    currentPhotoPath = null;
+    renderPhotoGallery();
+  }
+  // legacy alias usato dal codice esistente (resetForm, beginEdit, getStartedForm)
+  function clearPendingPhoto() { clearPhotoGallery(); }
+
+  function pendingPreviewUrl(file) {
+    const u = URL.createObjectURL(file);
+    pendingPhotoUrls.push(u);
+    return u;
+  }
+
+  function visiblePhotos() {
+    // photos mostrate nella galleria: existingPhotos - pendingRemovals + pendingPhotoFiles
+    const existing = existingPhotos.filter(p => !pendingRemovals.includes(p.id));
+    return { existing, pending: pendingPhotoFiles.slice() };
+  }
+
+  function renderPhotoGallery() {
+    const root = $('photo-gallery');
+    const counter = $('photo-counter');
+    const list = $('photo-gallery-list');
+    if (!root || !counter || !list) return;
+    const { existing, pending } = visiblePhotos();
+    const total = existing.length + pending.length;
+    if (total === 0) {
+      root.hidden = true;
+      counter.textContent = '';
+      list.innerHTML = '';
+      // bottone "Rimuovi tutte" visibile solo in edit e solo se ci sono foto già caricate
+      const rmBtn = $('remove-photo-btn');
+      if (rmBtn) rmBtn.hidden = !(editingId && existingPhotos.length > 0);
+      return;
+    }
+    root.hidden = false;
+    counter.innerHTML = `<span aria-hidden="true">📷</span> <strong>${total}</strong> foto`;
+    const rmBtn = $('remove-photo-btn');
+    if (rmBtn) rmBtn.hidden = !(editingId && existingPhotos.length > 0);
+
+    let html = '';
+    // pending PRIMA (in alto): con badge "nuova" così l'utente vede cosa sta per caricare
+    pending.forEach((f, idx) => {
+      const url = pendingPreviewUrl(f);
+      html += `<div class="photo-thumb" data-pending-idx="${idx}">
+        <img src="${escapeHtml(url)}" alt="" />
+        <span class="photo-thumb-badge">nuova</span>
+        <button type="button" class="photo-thumb-remove" data-action="remove-pending" data-idx="${idx}" aria-label="Rimuovi foto">✕</button>
+      </div>`;
+    });
+    existing.forEach((p) => {
+      // p.url è già /photos/<file>; usiamo escapehtml sul filename-encoded
+      const url = p.url || ('/photos/' + encodeURIComponent(p.photo_path));
+      html += `<div class="photo-thumb" data-existing-id="${p.id}">
+        <img src="${escapeHtml(url)}" alt="" loading="lazy" />
+        ${pendingRemovals.includes(p.id) ? '<span class="photo-thumb-badge" style="background:rgba(185,77,77,0.85)">rimossa</span>' : ''}
+        <button type="button" class="photo-thumb-remove" data-action="remove-existing" data-id="${p.id}" aria-label="Rimuovi foto dal server">✕</button>
+      </div>`;
+    });
+    list.innerHTML = html;
+  }
+
+  async function addPendingFiles(files) {
+    const arr = Array.from(files || []);
+    if (!arr.length) return;
+    // push nuovi pending
+    for (const f of arr) {
+      if (!f || !f.type || !f.type.startsWith('image/')) continue;
+      pendingPhotoFiles.push(f);
+      // resize client-side simile al flusso esistente; se fallisce, tiene l'originale
+      try {
+        const r = await maybeResizeImage(f);
+        if (r.resized) {
+          // sostituisci l'ultimo aggiunto con la versione ridotta
+          pendingPhotoFiles[pendingPhotoFiles.length - 1] = r.file;
+        }
+      } catch (e) { console.warn('resize client foto:', e); }
+    }
+    renderPhotoGallery();
+  }
+
+  function removePendingPhotoAt(idx) {
+    if (idx < 0 || idx >= pendingPhotoFiles.length) return;
+    pendingPhotoFiles.splice(idx, 1);
+    renderPhotoGallery();
+  }
+  function markExistingPhotoRemoved(id) {
+    if (!pendingRemovals.includes(id)) pendingRemovals.push(id);
+    renderPhotoGallery();
+  }
+  function unmarkExistingPhotoRemoved(id) {
+    pendingRemovals = pendingRemovals.filter(x => x !== id);
+    renderPhotoGallery();
+  }
+
+  // foto-galleria: handlers dei bottoni ✕ dentro la lista
+  document.addEventListener('click', (ev) => {
+    const t = ev.target.closest('[data-action]');
+    if (!t) return;
+    const a = t.getAttribute('data-action');
+    if (a === 'remove-pending') {
+      ev.preventDefault();
+      removePendingPhotoAt(parseInt(t.getAttribute('data-idx'), 10));
+    } else if (a === 'remove-existing') {
+      ev.preventDefault();
+      const id = parseInt(t.getAttribute('data-id'), 10);
+      if (pendingRemovals.includes(id)) unmarkExistingPhotoRemoved(id);
+      else markExistingPhotoRemoved(id);
+    }
+  });
 
   // Helper: prova a decodificare la foto e a ricodificarla a JPEG max 1600 px q=85
   // per alleggerire l'upload. Restituisce { file, resized, ... }.
@@ -351,39 +509,16 @@
       : (n / 1024 / 1024).toFixed(2) + ' MB';
   }
 
+  // Bind photo input (galleria multi-foto): può accettare più file in una volta
+  // (l'input è `multiple`). Reset value PRIMA dell'await per permettere di
+  // riscegliere gli stessi file. Il resize client-side viene applicato per ogni foto
+  // individualmente da addPendingFiles().
   function bindPhotoFileInput(input) {
     input.addEventListener('change', async () => {
-      const f = input.files && input.files[0];
-      // reset del value PRIMA dell'await per permettere di riscegliere lo stesso file
+      const fs = input.files ? Array.from(input.files) : [];
       input.value = '';
-      if (!f) return;
-
-      clearPendingPhoto();
-      pendingPhotoFile = f;
-      pendingPhotoUrl = URL.createObjectURL(f);
-      $('photo-preview-img').src = pendingPhotoUrl;
-      $('photo-preview').hidden = false;
-
-      // Pre-resize sul dispositivo se la foto è "troppo grossa" (> 1600 px lato
-      // lungo OPPURE > 1.2 MB). Mostra subito l'originale, poi swap sulla versione
-      // ridotta con un toast informativo: così l'utente vede il prima/dopo e sa
-      // cosa è stato inviato al server.
-      try {
-        const result = await maybeResizeImage(f);
-        if (result.resized) {
-          URL.revokeObjectURL(pendingPhotoUrl);
-          pendingPhotoFile = result.file;
-          pendingPhotoUrl = URL.createObjectURL(result.file);
-          $('photo-preview-img').src = pendingPhotoUrl;
-          toast(
-            `📦 foto ridotta: ${fmtBytes(result.fromBytes)} → ${fmtBytes(result.toBytes)} (${result.width}×${result.height})`,
-            'success'
-          );
-        }
-      } catch (e) {
-        console.warn('resize foto lato client:', e);
-        // Fallback silenzioso: tieni l'originale. multer rifiuterà 413 se > 8 MB.
-      }
+      if (!fs.length) return;
+      await addPendingFiles(fs);
     });
   }
   bindPhotoFileInput($('photo-input-gallery'));
@@ -392,35 +527,43 @@
   $('btn-choose-photo').addEventListener('click', () => $('photo-input-gallery').click());
   $('btn-take-photo').addEventListener('click', () => $('photo-input-camera').click());
 
-  async function uploadPhoto(wineId, file) {
+  // Upload multi-foto: una sola POST multipart con tutti i File. Il server accetta
+  // fino a 8 foto/richiesta (upload.array('photos', 8)). Le nuove foto vengono
+  // accodate in coda alle esistenti.
+  async function uploadPhotosMulti(wineId, files) {
     const fd = new FormData();
-    fd.append('photo', file, file.name);
-    const r = await fetch('/api/wines/' + wineId + '/photo', { method: 'POST', body: fd });
+    for (const f of files) fd.append('photos', f, f.name);
+    const r = await fetch('/api/wines/' + wineId + '/photos', { method: 'POST', body: fd });
     let body = null;
     try { body = await r.json(); } catch (_) { /* ignore */ }
     if (!r.ok) throw new Error((body && body.error) || ('HTTP ' + r.status));
     return body;
   }
 
-  async function removePhoto(wineId) {
-    await api('/api/wines/' + wineId + '/photo', { method: 'DELETE' });
-  }
-
-  $('remove-photo-btn').addEventListener('click', async () => {
-    if (!editingId) {
-      // in fase di creazione: la foto era solo locale, basta scartarla
-      clearPendingPhoto();
-    } else {
+  // Elimina una o più foto esistenti via DELETE /api/wines/:id/photos/:photoId.
+  // errors[] per photo: best-effort, ignora singoli 404 e continua.
+  async function deletePhotosMulti(wineId, photoIds) {
+    const errors = [];
+    for (const id of photoIds) {
       try {
-        await removePhoto(editingId);
-        currentPhotoPath = null;
-        clearPendingPhoto();
-        toast('Foto rimossa', 'success');
-        loadWines();
+        await api('/api/wines/' + wineId + '/photos/' + id, { method: 'DELETE' });
       } catch (e) {
-        toast('Errore: ' + e.message, 'error');
+        errors.push({ id, error: String(e.message || e) });
       }
     }
+    return errors;
+  }
+
+  // Bottone "Rimuovi tutte" (visibile solo in edit): le foto existing esistenti
+  // vengono marcate per rimozione; l'azione DELETE avviene al save successivo.
+  // Però per dare feedback immediato all'utente che qualcosa è cambiato, le
+  // marchiamo subito come pendingRemovals.
+  $('remove-photo-btn').addEventListener('click', () => {
+    if (!editingId || !existingPhotos.length) return;
+    for (const p of existingPhotos) {
+      if (!pendingRemovals.includes(p.id)) pendingRemovals.push(p.id);
+    }
+    renderPhotoGallery();
   });
 
   $('cancel-edit-btn').addEventListener('click', resetForm);
@@ -456,13 +599,52 @@
         const out = await api('/api/wines', { method: 'POST', body: JSON.stringify(payload) });
         wineId = out.id;
       }
-      if (pendingPhotoFile) {
+      // 1. Cancella le foto esistenti marcate per rimozione (prima di uploadare le nuove)
+      let deleteErrors = 0;
+      if (editingId && pendingRemovals.length) {
+        const errs = await deletePhotosMulti(wineId, pendingRemovals.slice());
+        deleteErrors = errs.length;
+      }
+      // 2. Upload delle nuove pendingPhotoFiles (in blocco, fino a 8 per volta)
+      let uploadErrors = 0;
+      if (pendingPhotoFiles.length) {
         try {
-          await uploadPhoto(wineId, pendingPhotoFile);
-          toast(editingId ? 'Vino aggiornato e foto caricata' : 'Vino aggiunto e foto caricata', 'success');
+          // upload.array ha limite 8 per richiesta; chunkiamo se necessario.
+          const chunks = [];
+          for (let i = 0; i < pendingPhotoFiles.length; i += 8) {
+            chunks.push(pendingPhotoFiles.slice(i, i + 8));
+          }
+          let totalInserted = 0;
+          for (const ch of chunks) {
+            const r = await uploadPhotosMulti(wineId, ch);
+            totalInserted += (r.inserted || []).length;
+            uploadErrors += (r.errors || []).length;
+          }
+          if (uploadErrors > 0) {
+            toast(
+              `${editingId ? 'Vino aggiornato' : 'Vino aggiunto'}; ${totalInserted} foto OK, ${uploadErrors} non caricate`,
+              'error'
+            );
+          } else if (deleteErrors > 0) {
+            toast(
+              `${editingId ? 'Vino aggiornato' : 'Vino aggiunto'}; ${deleteErrors} foto non rimosse`,
+              'error'
+            );
+          } else {
+            const n = pendingPhotoFiles.length;
+            toast(
+              `${editingId ? 'Vino aggiornato' : 'Vino aggiunto'}; ${n} foto caricate`,
+              'success'
+            );
+          }
         } catch (e) {
-          toast('Vino salvato, ma foto non caricata: ' + e.message, 'error');
+          toast(
+            `${editingId ? 'Vino aggiornato' : 'Vino aggiunto'}, ma foto non caricate: ${e.message}`,
+            'error'
+          );
         }
+      } else if (deleteErrors > 0) {
+        toast(`Vino aggiornato; ${deleteErrors} foto non rimosse`, 'error');
       } else {
         toast(editingId ? 'Vino aggiornato' : 'Vino aggiunto', 'success');
       }

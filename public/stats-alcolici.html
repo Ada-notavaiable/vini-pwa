@@ -389,14 +389,106 @@
         if (ev.target === $('spirit-modal')) closeSpiritModal();
       });
 
-      // ---------- lightbox ----------
+      // ---------- lightbox (singola + carousel multi-foto) ----------
 
       let lastImgTrigger = null;
-      function openImageLightbox(src, alt, trigger) {
-        lastImgTrigger = trigger || null;
+
+      function renderCarouselInLightbox(photos) {
         const lb = $('image-lightbox');
+        lb.querySelectorAll('.photo-carousel, .photo-carousel-prev, .photo-carousel-next, .photo-carousel-dots, .photo-carousel-caption').forEach(n => n.remove());
         const img = $('image-lightbox-img');
-        img.src = src; img.alt = alt || '';
+        if (photos.length === 1) {
+          img.src = photos[0].url; img.alt = photos[0].alt || ''; img.style.display = '';
+          return;
+        }
+        img.style.display = 'none';
+        const carousel = document.createElement('div');
+        carousel.className = 'photo-carousel';
+        const track = document.createElement('div');
+        track.className = 'photo-carousel-track';
+        photos.forEach((p, i) => {
+          const slide = document.createElement('div');
+          slide.className = 'photo-carousel-slide';
+          const im = document.createElement('img');
+          im.src = p.url; im.alt = (p.alt || '') + ' (' + (i + 1) + '/' + photos.length + ')';
+          im.draggable = false;
+          slide.appendChild(im); track.appendChild(slide);
+        });
+        carousel.appendChild(track);
+        const prev = document.createElement('button');
+        prev.type = 'button'; prev.className = 'photo-carousel-prev';
+        prev.setAttribute('aria-label', 'Foto precedente'); prev.textContent = '‹';
+        const next = document.createElement('button');
+        next.type = 'button'; next.className = 'photo-carousel-next';
+        next.setAttribute('aria-label', 'Foto successiva'); next.textContent = '›';
+        const dots = document.createElement('div');
+        dots.className = 'photo-carousel-dots';
+        const dotsBtns = photos.map((_, i) => {
+          const b = document.createElement('button');
+          b.type = 'button'; b.className = 'photo-carousel-dot' + (i === 0 ? ' active' : '');
+          b.setAttribute('aria-label', 'Vai alla foto ' + (i + 1));
+          b.dataset.idx = String(i);
+          dots.appendChild(b);
+          return b;
+        });
+        const cap = document.createElement('div');
+        cap.className = 'photo-carousel-caption';
+        cap.textContent = '1 / ' + photos.length;
+        carousel.appendChild(prev); carousel.appendChild(next); carousel.appendChild(dots);
+        lb.appendChild(carousel); lb.appendChild(cap);
+
+        let idx = 0;
+        function setIdx(n) {
+          idx = Math.max(0, Math.min(photos.length - 1, n));
+          track.scrollTo({ left: idx * track.clientWidth, behavior: 'smooth' });
+          dotsBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
+          cap.textContent = (idx + 1) + ' / ' + photos.length;
+        }
+        prev.addEventListener('click', () => setIdx(idx - 1));
+        next.addEventListener('click', () => setIdx(idx + 1));
+        dotsBtns.forEach(b => b.addEventListener('click', () => setIdx(parseInt(b.dataset.idx, 10))));
+        lb.addEventListener('keydown', lbKeyHandler);
+        let touchStartX = null;
+        track.addEventListener('touchstart', (ev) => {
+          touchStartX = (ev.changedTouches && ev.changedTouches[0] && ev.changedTouches[0].clientX) || null;
+        }, { passive: true });
+        track.addEventListener('touchend', (ev) => {
+          if (touchStartX == null) return;
+          const x = (ev.changedTouches && ev.changedTouches[0] && ev.changedTouches[0].clientX) || touchStartX;
+          const dx = x - touchStartX;
+          if (Math.abs(dx) > 40) setIdx(idx + (dx < 0 ? 1 : -1));
+          touchStartX = null;
+        });
+        let scrollTimeout = null;
+        track.addEventListener('scroll', () => {
+          if (scrollTimeout) clearTimeout(scrollTimeout);
+          scrollTimeout = setTimeout(() => {
+            const w = track.clientWidth || 1;
+            const newIdx = Math.round(track.scrollLeft / w);
+            if (newIdx !== idx) {
+              idx = newIdx;
+              dotsBtns.forEach((b, i) => b.classList.toggle('active', i === idx));
+              cap.textContent = (idx + 1) + ' / ' + photos.length;
+            }
+          }, 80);
+        });
+        setIdx(0);
+      }
+
+      let lbKeyHandler = (ev) => {
+        if (!$('image-lightbox').classList.contains('open')) return;
+        const carousel = $('image-lightbox').querySelector('.photo-carousel');
+        if (!carousel) return;
+        if (ev.key === 'ArrowLeft')  { ev.preventDefault(); carousel.querySelector('.photo-carousel-prev').click(); }
+        if (ev.key === 'ArrowRight') { ev.preventDefault(); carousel.querySelector('.photo-carousel-next').click(); }
+      };
+
+      function openImageLightbox(src, alt, trigger) { openImageLightboxMulti([{ url: src, alt: alt || '' }], trigger); }
+      function openImageLightboxMulti(photos, trigger) {
+        if (!photos || !photos.length) return;
+        const lb = $('image-lightbox');
+        lastImgTrigger = trigger || null;
+        renderCarouselInLightbox(photos);
         lb.classList.add('open');
         lb.setAttribute('aria-hidden', 'false');
         document.body.style.overflow = 'hidden';
@@ -407,20 +499,34 @@
         const img = $('image-lightbox-img');
         lb.classList.remove('open');
         lb.setAttribute('aria-hidden', 'true');
-        setTimeout(() => { try { img.src = ''; img.alt = ''; } catch (_) {} }, 200);
+        lb.querySelectorAll('.photo-carousel, .photo-carousel-prev, .photo-carousel-next, .photo-carousel-dots, .photo-carousel-caption').forEach(n => n.remove());
+        setTimeout(() => { try { img.src = ''; img.alt = ''; img.style.display = ''; } catch (_) {} }, 200);
         document.body.style.overflow = '';
         if (lastImgTrigger && typeof lastImgTrigger.focus === 'function') {
           try { lastImgTrigger.focus({ preventScroll: true }); } catch (_) { /* ignore */ }
         }
+        lastImgTrigger = null;
       }
       $('image-lightbox-close').addEventListener('click', closeImageLightbox);
       $('image-lightbox').addEventListener('click', (ev) => {
         if (ev.target === $('image-lightbox')) closeImageLightbox();
       });
-      $('wd-photo-btn').addEventListener('click', () => {
+      $('wd-photo-btn').addEventListener('click', async () => {
         const w = currentSpiritModal && currentSpiritModal.spirit;
         if (!w || !w.photo_path) return;
-        openImageLightbox('/photos/' + encodeURIComponent(w.photo_path), w.name, $('wd-photo-btn'));
+        const trigger = $('wd-photo-btn');
+        if (Number(w.photo_count) > 1) {
+          try {
+            const r = await fetch('/api/spirits/' + w.id);
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const full = await r.json();
+            const photos = (full.photos || []).map(p => ({
+              url: p.url, alt: w.name + ' (' + p.position + ')',
+            }));
+            if (photos.length) { openImageLightboxMulti(photos, trigger); return; }
+          } catch (_) { /* fallback: singola foto */ }
+        }
+        openImageLightbox('/photos/' + encodeURIComponent(w.photo_path), w.name, trigger);
       });
 
       // delega: click su qualunque spirit-card apre il popup

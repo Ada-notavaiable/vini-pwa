@@ -90,9 +90,9 @@
         </div>
 
         <div class="form-row">
-          <label>Foto (opzionale)</label>
-          <input id="photo-input-gallery" type="file" accept="image/*" hidden />
-          <input id="photo-input-camera"  type="file" accept="image/*" capture="environment" hidden />
+          <label>Foto (opzionali, più consentite)</label>
+          <input id="photo-input-gallery" type="file" accept="image/*" multiple hidden />
+          <input id="photo-input-camera"  type="file" accept="image/*" capture="environment" multiple hidden />
           <div class="photo-buttons">
             <button type="button" class="btn btn-secondary" id="btn-choose-photo">
               <span aria-hidden="true">📁</span> Scegli foto
@@ -100,11 +100,22 @@
             <button type="button" class="btn btn-secondary" id="btn-take-photo">
               <span aria-hidden="true">📷</span> Scatta foto
             </button>
+            <button type="button" class="btn btn-danger" id="remove-photo-btn" hidden title="Rimuovi tutte le foto di questo vino">
+              <span aria-hidden="true">🗑</span> Rimuovi tutte
+            </button>
           </div>
-          <div class="help-text">Verrà ridimensionata a 1024 px e salvata come JPEG per risparmiare spazio (max 8 MB in ingresso).</div>
-          <div class="photo-preview" id="photo-preview" hidden>
-            <img id="photo-preview-img" src="" alt="anteprima" />
-            <button type="button" class="btn btn-danger" id="remove-photo-btn">Rimuovi foto</button>
+          <div class="help-text">Verranno ridimensionate a 1024 px e salvate come JPEG per risparmiare spazio (max 8 MB in ingresso).</div>
+          <!-- Galleria foto: contiene sia foto "pending" (da caricare al save) sia foto
+               "esistenti" (in modalità modifica). Ciascuna con thumbnail 56×56 e ✕ per
+               rimuoverla. Il counter 📷 N appare sopra la lista quando c'è almeno 1 foto. -->
+          <div class="photo-gallery" id="photo-gallery" hidden>
+            <div class="photo-counter" id="photo-counter"></div>
+            <div class="photo-gallery-list" id="photo-gallery-list"></div>
+          </div>
+          <input type="file" id="photo-input-gallery-old" accept="image/*" hidden style="display:none" aria-hidden="true" />
+          <input type="file" id="photo-input-camera-old"  accept="image/*" capture="environment" hidden style="display:none" aria-hidden="true" />
+          <div class="photo-preview" id="photo-preview" hidden style="display:none" aria-hidden="true">
+            <img id="photo-preview-img" src="" alt="" />
           </div>
         </div>
 
