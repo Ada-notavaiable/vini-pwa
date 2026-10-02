@@ -146,6 +146,36 @@ Per backup automatici giornalieri (cron) schedulalo sull'host. `docker cp` funzi
 0 3 * * * docker cp vinipwa:/data/vini.db /percorso/backup/vini-$(date +\%F).db || logger -t vini-backup "fallito: container assente"
 ```
 
+### Auto-riparazione e diagnosi da remoto
+
+L'app non richiede più il riavvio manuale della stack quando si avaria:
+
+- **Watchdog interno**: ogni 15 s fa un `SELECT 1` sul DB e conta gli errori 5xx
+  degli ultimi 60 s. Se il DB non risponde (tipicamente dopo un picco di memoria
+  che lascia sql.js senza connessione) oppure ci sono ≥10 risposte 5xx in 60 s,
+  il processo esce con codice 1 e la policy `restart: unless-stopped` lo riavvia
+  in pochi millisecondi.
+- **Healthcheck Docker** punta su `GET /api/health` (leggero) invece che su
+  `/api/stats`, che carica tutto il DB e serializza un JSON grosso ogni 30 s.
+- **Salvataggio del DB atomico** (`.tmp` + rename): se il processo muore a metà
+  scrittura, `/data/vini.db` resta il file precedente e integro.
+- Ogni errore viene registrato: `last_error` / `last_save_error` in `/api/health`,
+  stack nei log.
+
+Per capire cosa sta succedendo **stando lontano da casa**:
+
+```bash
+# stato dell'app (200 = sano, 503 = in avaria)
+curl http://<ip-orange-pi>:3100/api/health
+
+# ultimi eventi (da Portainer: Containers → vinipwa → Logs, oppure via SSH)
+docker logs --tail 100 vinipwa | grep -E '\[watchdog\]|\[db\]|\[err\]|\[fatal\]'
+```
+
+Soglie regolabili (opzionali, nella sezione Environment variables dello stack):
+`WATCHDOG_INTERVAL_MS` (15000), `WATCHDOG_MIN_UPTIME_MS` (60000),
+`WATCHDOG_ERROR_WINDOW_MS` (60000), `WATCHDOG_MAX_ERRORS` (10).
+
 ### Reset completo (cancella DB e foto)
 
 ```bash

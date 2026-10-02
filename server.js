@@ -23,6 +23,39 @@ const PHOTO_JPEG_QUALITY = 80;    // qualità JPEG di output (jimp 0-100)
 let db = null;
 let dbSaveTimer = null;
 
+// Stato di salute dell'app: lo leggono /api/health e il watchdog in fondo al file.
+// Serve per capire DA REMOTO perché un container è unhealthy senza dover stare a casa.
+const STARTED_AT = Date.now();
+let lastError = null;      // ultimo errore 5xx servito a un client ({at, where, message})
+let lastSaveError = null;  // ultimo errore di salvataggio del DB su disco
+let recentErrors = [];     // timestamp degli ultimi 5xx (finestra scorrevole di 60s)
+
+// Soglie del watchdog (vedi fine file): con 256 MB di RAM un picco può lasciare il
+// DB in avaria; il watchdog lo scopre da solo e riavvia il processo invece di
+// lasciare l'app a rispondere 500 finché qualcuno non ricarica la stack a mano.
+// Le env var servono per testare/ritoccare le soglie senza toccare il codice.
+function envNum(name, def) {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v >= 0 ? v : def;
+}
+const WATCHDOG_INTERVAL_MS = envNum('WATCHDOG_INTERVAL_MS', 15000);      // quanto spesso controlla
+const WATCHDOG_MIN_UPTIME_MS = envNum('WATCHDOG_MIN_UPTIME_MS', 60000);  // non decidere subito dopo il boot
+const WATCHDOG_ERROR_WINDOW_MS = envNum('WATCHDOG_ERROR_WINDOW_MS', 60000); // finestra di conteggio dei 5xx
+const WATCHDOG_MAX_ERRORS = envNum('WATCHDOG_MAX_ERRORS', 10);           // 5xx in finestra → stato non sano
+
+function noteError(where, err) {
+  const message = String((err && err.message) || err);
+  lastError = { at: new Date().toISOString(), where, message };
+  recentErrors.push(Date.now());
+  if (recentErrors.length > 200) recentErrors = recentErrors.slice(-200);
+}
+
+// Probe minimale del DB: usata dal watchdog e da /api/health (SELECT 1, niente
+// caricamento del DB intero come fa /api/stats).
+function dbProbeOk() {
+  try { getOne('SELECT 1 AS ok'); return true; } catch (_) { return false; }
+}
+
 async function initDb() {
   const SQL = await initSqlJs();
   if (fs.existsSync(DB_PATH)) {
@@ -151,18 +184,60 @@ async function initDb() {
   saveDB(true);
 }
 
-function saveDB(immediate = false) {
-  if (dbSaveTimer) clearTimeout(dbSaveTimer);
-  const doSave = () => {
-    try {
-      const data = db.export();
-      fs.writeFileSync(DB_PATH, Buffer.from(data));
-    } catch (e) {
-      console.error('[db] errore salvataggio:', e);
+// ---------- salvataggio del DB ----------
+// ATTENZIONE: db.export() di sql.js NON è un'operazione innocua: fa
+//   sqlite3_close_v2() → legge il file → sqlite3_open()
+// quindi CHIUDE e RIAPRE la connessione SQLite a ogni salvataggio. Due conseguenze:
+//   1. il PRAGMA foreign_keys (per-connessione, NON persistente) va perduto ogni volta
+//      → senza riapplicarlo, `ON DELETE SET NULL` viene ignorato e i vini restano con
+//        un store_id orfano (spariscono dalle statistiche);
+//   2. se export() fallisce a metà (tipicamente picco di memoria sulla board), il handle
+//      resta CHIUSO e da lì in poi OGNI query lancia errore → tutte le API rispondono
+//      500 per sempre, finché qualcuno non riavvia il container.
+// Per questo il flush è prudente, atomico su disco e se resta senza handle fa subìto
+// emergenza (vedi watchdog).
+const SAVE_DEBOUNCE_MS = 2000; // era 600ms: meno export = meno picchi di RAM e meno close/reopen
+
+function noteSaveError(e, where) {
+  lastSaveError = { at: new Date().toISOString(), where, message: String((e && e.message) || e) };
+  console.error(`[db] ${where}:`, e);
+}
+
+function flushDb() {
+  let data;
+  try {
+    data = db.export();
+  } catch (e) {
+    noteSaveError(e, 'export fallito (handle DB forse chiuso a metà)');
+    if (!dbProbeOk()) {
+      // Handle morto: ogni richiesta da qui in avanti restituirebbe 500. Meglio morire
+      // ora: la policy `restart: unless-stopped` riavvia il container in pochi ms.
+      console.error('[db] connessione DB non recuperabile dopo il fallito export → exit(1)');
+      process.exit(1);
     }
-  };
-  if (immediate) doSave();
-  else dbSaveTimer = setTimeout(doSave, 600);
+    return; // DB ancora vivo: il prossimo save riproverà (i dati restano in RAM)
+  }
+  // export() ha riaperto la connessione: il pragma va riapplicato subito.
+  try { db.run('PRAGMA foreign_keys = ON;'); } catch (_) { /* ignore */ }
+
+  // Scrittura ATOMICA (tmp + rename): se il processo muore o il volume si riempie
+  // a metà, /data/vini.db resta il file precedente e integro invece di un file troncato
+  // (che al prossimo boot farebbe crashare l'app in loop).
+  const tmpPath = DB_PATH + '.tmp';
+  try {
+    fs.writeFileSync(tmpPath, Buffer.from(data));
+    fs.renameSync(tmpPath, DB_PATH);
+    lastSaveError = null;
+  } catch (e) {
+    noteSaveError(e, 'scrittura su disco fallita');
+    try { fs.unlinkSync(tmpPath); } catch (_) { /* ignore */ }
+  }
+}
+
+function saveDB(immediate = false) {
+  if (dbSaveTimer) { clearTimeout(dbSaveTimer); dbSaveTimer = null; }
+  if (immediate) { flushDb(); return; }
+  dbSaveTimer = setTimeout(() => { dbSaveTimer = null; flushDb(); }, SAVE_DEBOUNCE_MS);
 }
 
 process.on('SIGINT', () => { saveDB(true); process.exit(0); });
@@ -297,6 +372,15 @@ function countPhotos(parentId, kind) {
   return r ? r.n : 0;
 }
 
+// Cancella un file temporaneo di multer (path FUORI da PHOTO_DIR, quindi niente
+// i controlli di safeUnlinkPhoto). Finora si passava basename(f.path) a
+// safeUnlinkPhoto, che di fatto cercava il file dentro PHOTO_DIR (dove non c'era):
+// ogni upload fallito lasciava un file da 8 MB in /tmp dentro il layer del container.
+function safeUnlinkTemp(filePath) {
+  if (!filePath) return;
+  try { fs.unlink(filePath, () => { /* ignore */ }); } catch (_) { /* ignore */ }
+}
+
 // Cancella in sicurezza un file da PHOTO_DIR (mai lanciare eccezione al chiamante).
 function safeUnlinkPhoto(filename) {
   if (!filename) return;
@@ -349,6 +433,19 @@ function applyExifOrientation(img, orientation) {
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+
+// Osserva TUTTE le risposte con status >= 500. Serve perché molti handler rispondono
+// con res.status(500).json(...) senza passare dall'error middleware: senza questo hook
+// quegli errori non finivano nè in last_error nè nel contatore del watchdog.
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    if (res.statusCode >= 500) {
+      noteError(`${req.method} ${req.originalUrl}`, res.locals.errMessage || `HTTP ${res.statusCode}`);
+    }
+  });
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 
 // servir foto da PHOTO_DIR al path /photos/<file>
@@ -553,6 +650,11 @@ app.post('/api/wines/:id/photo', upload.single('photo'), async (req, res) => {
     saveDB();
     res.json({ filename, width, height, url: `/photos/${filename}` });
   } catch (e) {
+    // Pulizia dei file temporanei di multer in caso di errore:
+    // senza questo ogni upload fallito lasciava un file da 8 MB in /tmp.
+    if (req.file) safeUnlinkTemp(req.file.path);
+    if (req.files) for (const f of req.files) safeUnlinkTemp(f.path);
+    res.locals.errMessage = 'errore elaborazione foto: ' + (e.message || e); // per /api/health e watchdog
     res.status(500).json({ error: 'errore elaborazione foto: ' + (e.message || e) });
   }
 });
@@ -611,13 +713,18 @@ app.post('/api/wines/:id/photos', upload.array('photos', 8), async (req, res) =>
         }
       } catch (e) {
         errors.push({ originalname: f.originalname, error: String(e.message || e) });
-        safeUnlinkPhoto(f.path && path.basename(f.path));
+        safeUnlinkTemp(f.path);
       }
     }
     syncPrimaryPhoto(id, 'wine');
     saveDB();
     res.json({ ok: true, inserted, errors });
   } catch (e) {
+    // Pulizia dei file temporanei di multer in caso di errore:
+    // senza questo ogni upload fallito lasciava un file da 8 MB in /tmp.
+    if (req.file) safeUnlinkTemp(req.file.path);
+    if (req.files) for (const f of req.files) safeUnlinkTemp(f.path);
+    res.locals.errMessage = 'errore elaborazione foto: ' + (e.message || e); // per /api/health e watchdog
     res.status(500).json({ error: 'errore elaborazione foto: ' + (e.message || e) });
   }
 });
@@ -829,6 +936,11 @@ app.post('/api/spirits/:id/photo', upload.single('photo'), async (req, res) => {
     saveDB();
     res.json({ filename, width, height, url: `/photos/${filename}` });
   } catch (e) {
+    // Pulizia dei file temporanei di multer in caso di errore:
+    // senza questo ogni upload fallito lasciava un file da 8 MB in /tmp.
+    if (req.file) safeUnlinkTemp(req.file.path);
+    if (req.files) for (const f of req.files) safeUnlinkTemp(f.path);
+    res.locals.errMessage = 'errore elaborazione foto: ' + (e.message || e); // per /api/health e watchdog
     res.status(500).json({ error: 'errore elaborazione foto: ' + (e.message || e) });
   }
 });
@@ -882,13 +994,18 @@ app.post('/api/spirits/:id/photos', upload.array('photos', 8), async (req, res) 
         }
       } catch (e) {
         errors.push({ originalname: f.originalname, error: String(e.message || e) });
-        safeUnlinkPhoto(f.path && path.basename(f.path));
+        safeUnlinkTemp(f.path);
       }
     }
     syncPrimaryPhoto(id, 'spirit');
     saveDB();
     res.json({ ok: true, inserted, errors });
   } catch (e) {
+    // Pulizia dei file temporanei di multer in caso di errore:
+    // senza questo ogni upload fallito lasciava un file da 8 MB in /tmp.
+    if (req.file) safeUnlinkTemp(req.file.path);
+    if (req.files) for (const f of req.files) safeUnlinkTemp(f.path);
+    res.locals.errMessage = 'errore elaborazione foto: ' + (e.message || e); // per /api/health e watchdog
     res.status(500).json({ error: 'errore elaborazione foto: ' + (e.message || e) });
   }
 });
@@ -940,6 +1057,33 @@ app.post('/api/spirits/:id/photos/reorder', (req, res) => {
   syncPrimaryPhoto(parentId, 'spirit');
   saveDB();
   res.json({ ok: true });
+});
+
+// ---------- API: health ----------
+// Endpoint usato dal healthcheck di Docker (prima puntava su /api/stats, che carica
+// tutto il DB e serializza un JSON grosso: un check ogni 30s che di per sé causava
+// picchi di memoria su una board con 256 MB). Qui bastano un SELECT 1 e lo stato
+// raccolto in memoria, così il container si avara (o no) per motivi reali.
+// Restituisce 503 quando il DB non risponde o ci sono stati 5xx ripetuti,
+// ed espone l'ultimo errore: utile per diagnosticare da remoto con un semplice curl.
+app.get('/api/health', (req, res) => {
+  try {
+    const now = Date.now();
+    recentErrors = recentErrors.filter(t => now - t < 60000);
+    const dbOk = dbProbeOk();
+    const ok = dbOk && recentErrors.length < WATCHDOG_MAX_ERRORS;
+    res.status(ok ? 200 : 503).json({
+      ok,
+      db_ok: dbOk,
+      uptime_s: Math.round((now - STARTED_AT) / 1000),
+      errors_last_60s: recentErrors.length,
+      memory_mb: Math.round(process.memoryUsage().rss / 1048576),
+      last_error: lastError,
+      last_save_error: lastSaveError,
+    });
+  } catch (e) {
+    res.status(503).json({ ok: false, error: String((e && e.message) || e) });
+  }
 });
 
 // ---------- API: storage (foto, DB, disco) ----------
@@ -1021,18 +1165,22 @@ app.get('/api/stats', (req, res) => {
   }
   const byStoreMap = new Map();
   for (const w of allWines) {
-    // I vini SENZA negozio sono ora raggruppati in un blocco sintetico (id=null,
+    // I vini SENZA negozio sono raggruppati in un blocco sintetico (id=null,
     // name='— Senza negozio —') in modo che la pagina stats li mostri nello stesso
     // stile delle sezioni per negozio (toggle 🍾/🍷, counter, card cliccabili).
     // È ancora il consumers JS a renderizzare — qui ci limitiamo a produrre la sezione.
+    // NB: un vino con store_id orfano (negozio cancellato con FK disattivate) non va
+    // più saltato con `continue` — finiva nel blocco "Senza negozio", altrimenti
+    // spariva dalle statistiche pur essendo ancora nel DB.
     const isGrouped = w.store_id == null;
-    const sId = isGrouped ? '__null_store__' : Number(w.store_id);
+    const storeName = isGrouped ? '— Senza negozio —' : storesById.get(Number(w.store_id));
+    const orphanStore = !isGrouped && !storeName; // negozio più esistente → trattalo come "senza negozio"
+    const sId = (isGrouped || orphanStore) ? '__null_store__' : Number(w.store_id);
     let s = byStoreMap.get(sId);
     if (!s) {
-      const sName = isGrouped ? '— Senza negozio —' : storesById.get(Number(w.store_id));
-      if (!sName) continue;
+      const sName = storeName || '— Senza negozio —';
       s = {
-        id: isGrouped ? null : Number(w.store_id), name: sName,
+        id: (isGrouped || orphanStore) ? null : Number(w.store_id), name: sName,
         count: 0, avg_rating: null,
         count_bianco: 0, count_rosso: 0, count_null: 0,
         wines: { bianco: [], rosso: [], null_type: [] },
@@ -1142,14 +1290,17 @@ app.get('/api/spirits-stats', (req, res) => {
   // typeMap è una mappa dinamica perché spirit_type non è un enum chiuso.
   const byStoreMap = new Map();
   for (const s of allSpirits) {
+    // Stessa logica di /api/stats: store_id orfano → blocco "Senza negozio"
+    // invece di saltare il record (che sparirebbe dalle statistiche).
     const isGrouped = s.store_id == null;
-    const sId = isGrouped ? '__null_store__' : Number(s.store_id);
+    const storeName = isGrouped ? '— Senza negozio —' : storesById.get(Number(s.store_id));
+    const orphanStore = !isGrouped && !storeName;
+    const sId = (isGrouped || orphanStore) ? '__null_store__' : Number(s.store_id);
     let entry = byStoreMap.get(sId);
     if (!entry) {
-      const sName = isGrouped ? '— Senza negozio —' : storesById.get(Number(s.store_id));
-      if (!sName) continue;
+      const sName = storeName || '— Senza negozio —';
       entry = {
-        id: isGrouped ? null : Number(s.store_id),
+        id: (isGrouped || orphanStore) ? null : Number(s.store_id),
         name: sName,
         count: 0,
         avg_rating: null,
@@ -1891,8 +2042,49 @@ app.use((err, req, res, next) => {
       : (err.message || 'errore upload');
     return res.status(413).json({ error: msg });
   }
+  // Registra l'errore prima di rispondere: è quello che /api/health e il watchdog
+  // usano per capire se l'app è sana. I MulterError (413, colpa del client) sono
+  // già stati gestiti sopra; idem gli errori con status 4xx esplicito (body JSON
+  // malformato, payload troppo grande…): sono errori del client, non dell'app e
+  // non devono né contare come malfunzionamento né innescare il watchdog.
+  const status = (err && Number(err.status) >= 400 && Number(err.status) < 500) ? Number(err.status) : 500;
+  if (status >= 500) res.locals.errMessage = String(err.message || err); // verrà contato dall'hook "finish"
   console.error('[err]', err);
-  res.status(500).json({ error: String(err.message || err) });
+  res.status(status).json({ error: String(err.message || err) });
+});
+
+// ---------- watchdog: auto-riparazione ----------
+// Docker segnala "unhealthy" ma NON riavvia mai i container da solo: per questo
+// finora l'unica via d'uscita era ricaricare la stack a mano da Portainer (e solo
+// stando a casa). Qui dentro il processo se ne accorge da solo e muore con exit 1:
+// la policy `restart: unless-stopped` lo riavvia in pochi millisecondi.
+setInterval(() => {
+  const now = Date.now();
+  if (now - STARTED_AT < WATCHDOG_MIN_UPTIME_MS) return;
+  recentErrors = recentErrors.filter(t => now - t < WATCHDOG_ERROR_WINDOW_MS);
+  const probeOk = dbProbeOk();
+  const n = recentErrors.length;
+  if (probeOk && n < WATCHDOG_MAX_ERRORS) return;
+  console.error('[watchdog] stato non recuperabile: ' +
+    `db_ok=${probeOk}, errori5xx_60s=${n}, ` +
+    `ultimo_errore=${lastError ? `${lastError.where}: ${lastError.message}` : 'n/a'}, ` +
+    `ultimo_errore_salvataggio=${lastSaveError ? lastSaveError.message : 'n/a'} ` +
+    '→ exit(1) per far ripartire il container.');
+  if (probeOk) saveDB(true); // ultimo salvataggio best-effort dei dati ancora in RAM
+  process.exit(1);
+}, WATCHDOG_INTERVAL_MS);
+
+// Un qualsiasi crash non deve lasciare un processo mezzo morto: logga, salva, muori.
+// (Docker riavvierebbe comunque, qui rendiamo l'evento leggibile nei log.)
+process.on('uncaughtException', (e) => {
+  console.error('[fatal] uncaughtException:', e);
+  try { saveDB(true); } catch (_) { /* ignore */ }
+  process.exit(1);
+});
+process.on('unhandledRejection', (e) => {
+  console.error('[fatal] unhandledRejection:', e);
+  try { saveDB(true); } catch (_) { /* ignore */ }
+  process.exit(1);
 });
 
 // ---------- start ----------
