@@ -133,6 +133,13 @@ docker compose logs -f vinipwa
 
 ### Backup
 
+Il backup dall'app (**Storage → Backup ZIP**, `GET /api/backup`) viene generato **in
+streaming**: ogni foto letta da disco una volta alla volta e scritta direttamente sul
+socket, quindi il picco di RAM resta costante (~80-100 MB) a prescindere da quante foto
+ci sono. Con il vecchio approccio (tutto bufferizzato in RAM) 87 MB di foto facevano
+**346 MB di picco**, ben oltre i 256 MB di `mem_limit` → OOM. Il picco corrente è
+visibile in `/api/health` col campo `peak_rss_mb`.
+
 Il database è un singolo file SQLite nel volume `vinidata`. Estrazione manuale:
 
 ```bash

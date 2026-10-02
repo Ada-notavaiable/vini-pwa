@@ -10,6 +10,7 @@ const initSqlJs = require('sql.js');
 const Jimp = require('jimp');
 const ExifParser = require('exif-parser');
 const AdmZip = require('adm-zip');
+const yazl = require('yazl'); // writer ZIP in streaming per /api/backup (vedi sotto)
 
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'vini.db');
@@ -1078,6 +1079,9 @@ app.get('/api/health', (req, res) => {
       uptime_s: Math.round((now - STARTED_AT) / 1000),
       errors_last_60s: recentErrors.length,
       memory_mb: Math.round(process.memoryUsage().rss / 1048576),
+      // picco di RSS dall'avvio: su 256 MB è la cosa da tenere d'occhio
+      // (un backup o un upload che lo fa esplodere è il segnale di un regresso)
+      peak_rss_mb: Math.round(process.resourceUsage().maxRSS / 1024),
       last_error: lastError,
       last_save_error: lastSaveError,
     });
@@ -1549,8 +1553,11 @@ app.get('/api/export/wines.csv', (req, res) => {
 //   wines.csv             — stesso formato di /api/export/wines.csv (metadati testuali)
 //   photos/&lt;filename&gt;     — una copia di ogni file in PHOTO_DIR (foto ridimensionate 1024px)
 //   MANIFEST.json         — { schema_version, generated_at, wine_count, photo_count }
-// Limiti pratici: bufferizzato interamente in memoria (Zip.toBuffer) → per centinaia di record
-// con foto è tipicamente 5-50 MB, ben sotto i 256 MB di mem_limit del container.
+// NOTA MEMORIA: in passato il ZIP veniva costruito interamente in RAM
+// (AdmZip.toBuffer): tutte le foto in memoria + una copia del risultato, e con alcune
+// centinaia di immagini si superavano i 256 MB di mem_limit (=> OOM / stato avario).
+// Ora il backup è generato in streaming con yazl: si legge una foto alla volta da
+// disco e la si scrive in pipe verso il client, la memoria resta ~costante.
 const BACKUP_SCHEMA_VERSION = 3;
 
 app.get('/api/backup', async (req, res) => {
@@ -1609,7 +1616,13 @@ app.get('/api/backup', async (req, res) => {
       for (const f of fs.readdirSync(PHOTO_DIR)) {
         const full = path.join(PHOTO_DIR, f);
         try {
-          if (fs.statSync(full).isFile()) { photoFiles.push(full); photoCount++; }
+          // isFile + leggibile: file illeggibili saltati QUI, così manifest, header
+          // e contenuto del zip restano coerenti tra loro.
+          if (fs.statSync(full).isFile()) {
+            fs.accessSync(full, fs.constants.R_OK);
+            photoFiles.push(full);
+            photoCount++;
+          }
         } catch (_) { /* race o permessi → ignora */ }
       }
     }
@@ -1625,18 +1638,24 @@ app.get('/api/backup', async (req, res) => {
       photo_count: photoCount,
     };
 
-    const zip = new AdmZip();
-    zip.addFile('MANIFEST.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'));
-    zip.addFile('wines.csv', Buffer.from(wineCsvText, 'utf8'));
-    zip.addFile('spirits.csv', Buffer.from(spiritCsvText, 'utf8'));
-    zip.addFile('wine_photos.csv', Buffer.from(winePhotosCsvText, 'utf8'));
-    zip.addFile('spirit_photos.csv', Buffer.from(spiritPhotosCsvText, 'utf8'));
+    // ----- costruzione del ZIP in streaming -----
+    // I CSV e il manifest sono minuscoli, restano in buffer; le foto vengono aggiunte
+    // per percorso e yazl le apre una alla volta durante l'invio (backpressure di pipe).
+    const zipfile = new yazl.ZipFile();
+    zipfile.addBuffer(Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'), 'MANIFEST.json');
+    zipfile.addBuffer(Buffer.from(wineCsvText, 'utf8'), 'wines.csv');
+    zipfile.addBuffer(Buffer.from(spiritCsvText, 'utf8'), 'spirits.csv');
+    zipfile.addBuffer(Buffer.from(winePhotosCsvText, 'utf8'), 'wine_photos.csv');
+    zipfile.addBuffer(Buffer.from(spiritPhotosCsvText, 'utf8'), 'spirit_photos.csv');
     for (const fullPath of photoFiles) {
-      // addLocalFile(preferDot:true)␤place at "photos/&lt;basename&gt;". Niente path traversal: il basename
-      // proviene da fs.readdirSync della nostra directory di lavoro.
-      zip.addLocalFile(fullPath, 'photos');
+      // Niente path traversal: il basename proviene da fs.readdirSync di PHOTO_DIR.
+      // compress:false: le foto sono già JPEG, ridiflare sarebbe solo fatica per l'ARM.
+      // Ancora non è stato scritto niente sul socket: se un file è sparito nel frattempo
+      // possiamo permetterci un pulito 500 JSON invece di un download troncato.
+      try { fs.accessSync(fullPath, fs.constants.R_OK); }
+      catch (_) { throw new Error('foto non leggibile: ' + path.basename(fullPath)); }
+      zipfile.addFile(fullPath, 'photos/' + path.basename(fullPath), { compress: false });
     }
-    const buf = zip.toBuffer();
 
     const yyyymmdd = new Date().toISOString().slice(0, 10);
     res.setHeader('Content-Type', 'application/zip');
@@ -1644,9 +1663,17 @@ app.get('/api/backup', async (req, res) => {
     res.setHeader('X-Wine-Count', String(wineRows.length));
     res.setHeader('X-Spirit-Count', String(spiritRows.length));
     res.setHeader('X-Photo-Count', String(photoCount));
-    res.send(buf);
+
+    // Da qui in poi i header sono partiti: un errore non può più diventare un 500 JSON,
+    // ci limitiamo a loggarlo e a chiudere lo stream (il client vedrà un download fallito).
+    const destroyStream = () => { if (!zipfile.outputStream.destroyed) zipfile.outputStream.destroy(); };
+    res.on('close', destroyStream); // client disconnesso a metà → smette di leggere le foto
+    zipfile.outputStream.on('error', (e) => { console.error('[backup] errore stream:', e); destroyStream(); });
+    zipfile.outputStream.pipe(res);
+    zipfile.end(); // tutti gli entry aggiunti: yazl può chiudere l'archivio
   } catch (e) {
     console.error('[backup]', e);
+    if (res.headersSent) { res.destroy(); return; }
     res.status(500).json({ error: 'backup fallito: ' + (e.message || e) });
   }
 });
