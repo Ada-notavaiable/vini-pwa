@@ -140,6 +140,18 @@ ci sono. Con il vecchio approccio (tutto bufferizzato in RAM) 87 MB di foto face
 **346 MB di picco**, ben oltre i 256 MB di `mem_limit` → OOM. Il picco corrente è
 visibile in `/api/health` col campo `peak_rss_mb`.
 
+Anche il **ripristino** (`POST /api/restore`) è a memoria costante e a prova di crash:
+
+- lo ZIP si legge in streaming con `yauzl`, in due passate (prima i CSV, poi le foto
+  una alla volta) ed è **indipendente dall'ordine degli entry**: funziona anche con i
+  backup prodotti dalle versioni precedenti, dove le foto venivano prima dei CSV.
+  Su un backup da 90 MB il picco è sceso da 189 MB a 127 MB, e non cresce con lo zip.
+- Ordine delle operazioni: foto nuove scritte → transazione DB (wipe + import + COMMIT)
+  → cancellazione delle foto vecchie. Le foto vecchie vengono cancellate per ultime, così
+  un crash a metà operazione lascia DB e filesystem coerenti con lo stato precedente.
+- Upload limitato a 200 MB (413 leggibile invece di un OOM) e file temporanei ripuliti
+  a ogni avvio del container.
+
 Il database è un singolo file SQLite nel volume `vinidata`. Estrazione manuale:
 
 ```bash

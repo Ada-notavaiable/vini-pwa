@@ -9,8 +9,8 @@ const multer = require('multer');
 const initSqlJs = require('sql.js');
 const Jimp = require('jimp');
 const ExifParser = require('exif-parser');
-const AdmZip = require('adm-zip');
 const yazl = require('yazl'); // writer ZIP in streaming per /api/backup (vedi sotto)
+const yauzl = require('yauzl'); // reader ZIP in streaming per /api/restore (vedi sotto)
 
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'vini.db');
@@ -18,6 +18,8 @@ const PHOTO_DIR = process.env.PHOTO_DIR || path.join(__dirname, 'photos');
 
 const PHOTO_MAX_DIM = 1024;       // px max lato lungo della foto ridimensionata
 const PHOTO_JPEG_QUALITY = 80;    // qualità JPEG di output (jimp 0-100)
+const PHOTO_MAX_UPLOAD_MB = 8;    // upload singolo/multiplo foto (multer)
+const RESTORE_MAX_UPLOAD_MB = 200; // upload del backup ZIP nel restore (multer)
 
 // ---------- bootstrap SQLite ----------
 
@@ -382,6 +384,18 @@ function safeUnlinkTemp(filePath) {
   try { fs.unlink(filePath, () => { /* ignore */ }); } catch (_) { /* ignore */ }
 }
 
+function purgeUploadTmp() {
+  // Rimuove i file temporanei di multer lasciati indietro da un crash precedente:
+  // vivono in /tmp (layer del container) e nessuno li ripulirebbe mai.
+  try {
+    const dir = path.join(require('os').tmpdir(), 'vinipwa-uploads');
+    if (!fs.existsSync(dir)) return;
+    const leftovers = fs.readdirSync(dir);
+    for (const f of leftovers) { try { fs.unlinkSync(path.join(dir, f)); } catch (_) { /* ignore */ } }
+    if (leftovers.length) console.log(`[upload] rimossi ${leftovers.length} file temporanei di avvi precedenti`);
+  } catch (_) { /* ignore */ }
+}
+
 // Cancella in sicurezza un file da PHOTO_DIR (mai lanciare eccezione al chiamante).
 function safeUnlinkPhoto(filename) {
   if (!filename) return;
@@ -457,7 +471,7 @@ app.use('/photos', express.static(PHOTO_DIR, { maxAge: '7d', fallthrough: true }
 // teniamoci bassi per evitare OOM sui device più piccoli.
 const upload = multer({
   dest: path.join(require('os').tmpdir(), 'vinipwa-uploads'),
-  limits: { fileSize: 8 * 1024 * 1024 }, // 8 MB di input → basta e avanza per 1024px JPEG
+  limits: { fileSize: PHOTO_MAX_UPLOAD_MB * 1024 * 1024 }, // → basta e avanza per 1024px JPEG
 });
 
 // ---------- API: stores ----------
@@ -1679,50 +1693,208 @@ app.get('/api/backup', async (req, res) => {
 });
 
 // ---------- API: ripristino da backup ZIP (wipe + reimport in transazione) ----------
-// WIPE SEMANTICS: questa route CANCELLA wines + stores + foto esistenti e poi inserisce
-// tutto quello che c'è nel backup. Confermato dal client con un confirm-modal. In caso di
-// errore a metà strade, il DB viene ripristinato allo stato vuoto (rollback SQLite).
-// Limite upload separato a 500 MB perché un backup con molte foto può essere grosso; il file
-// temporaneo viene scritto su OS tmpdir (vinipwa-uploads, configurato sotto), poi unlinked.
+// WIPE SEMANTICS: questa route SOSTITUISCE wines + stores + foto esistenti con quelli
+// del backup, confermato dal client con un confirm-modal.
+//
+// ORDINE DELLE OPERAZIONI (fondamentale: se il processo muore a metà non si perde nulla):
+//   1. lettura/validazione del backup       → nessun effetto collaterale
+//   2. scrivi le foto del backup su disco   → crash qui: il DB vecchio è intatto
+//   3. transazione DB (wipe + import)       → tutto SINCRONO, poi COMMIT + save
+//   4. cancella i file vecchi non usati     → crash qui: solo file di scarto in eccesso
+// Le foto vecchie vengono cancellate quindi per ULTIME. Prima venivano eliminate come
+// prima operazione: un OOM o un riavvio a metà restore le faceva sparire per sempre
+// (il DB tornava indietro grazie al rollback, i file no).
+//
+// MEMORIA: lo zip NON viene caricato in RAM (con `new AdmZip(path)` faceva readFileSync
+// di tutto l'archivio: misurato 90 MB di zip → 189 MB di picco su 256 MB di mem_limit).
+// Con yauzl si fa una passata per i 5 file di testo (pochi KB) e una per le foto,
+// una alla volta in streaming: il picco resta quello di base (~100 MB).
+//
+// Limite upload: 200 MB. La memoria non è più il vincolo, servono a tenere sotto
+// /tmp (layer del container su microSD) e a non far blockare il server per mezz'ora.
 const restoreUpload = multer({
   dest: path.join(require('os').tmpdir(), 'vinipwa-uploads'),
-  limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB
+  limits: { fileSize: RESTORE_MAX_UPLOAD_MB * 1024 * 1024 },
 });
 
-app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'file ZIP mancante' });
-  let zip;
+// Solo questi vengono bufferizzati in RAM durante la passata 1 (sono piccoli);
+// le foto invece si saltano con uno seek finché non serve la passata 2.
+const RESTORE_TEXT_FILES = ['MANIFEST.json', 'wines.csv', 'spirits.csv', 'wine_photos.csv', 'spirit_photos.csv'];
+const RESTORE_MAX_TEXT_BYTES = 32 * 1024 * 1024; // cap per singolo file di testo (difesa OOM)
+
+function openRestoreZip(filePath) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(filePath, { lazyEntries: true }, (err, zip) => (err ? reject(err) : resolve(zip)));
+  });
+}
+
+function readZipTextEntry(zip, entry) {
+  return new Promise((resolve, reject) => {
+    if (entry.uncompressedSize > RESTORE_MAX_TEXT_BYTES) {
+      return reject(new Error(`"${entry.fileName}" troppo grande (${entry.uncompressedSize} bytes)`));
+    }
+    zip.openReadStream(entry, (err, stream) => {
+      if (err) return reject(err);
+      const chunks = [];
+      let size = 0;
+      stream.on('data', (c) => {
+        size += c.length;
+        if (size > RESTORE_MAX_TEXT_BYTES) {
+          stream.destroy();
+          reject(new Error(`"${entry.fileName}" supera ${RESTORE_MAX_TEXT_BYTES} bytes`));
+          return;
+        }
+        chunks.push(c);
+      });
+      stream.once('end', () => resolve(Buffer.concat(chunks)));
+      stream.once('error', reject);
+    });
+  });
+}
+
+// Passata 1: estrae in RAM solo manifest + CSV, saltando le foto con uno seek.
+async function readRestoreTexts(filePath) {
+  const zip = await openRestoreZip(filePath);
+  const texts = {};
+  let done = false;
   try {
-    zip = new AdmZip(req.file.path);
+    await new Promise((resolve, reject) => {
+      const finish = (e) => { if (done) return; done = true; if (e) reject(e); else resolve(); };
+      zip.on('error', finish);
+      zip.on('end', () => finish());
+      zip.on('entry', (entry) => {
+        if (done) return;
+        if (!RESTORE_TEXT_FILES.includes(entry.fileName)) { zip.readEntry(); return; }
+        readZipTextEntry(zip, entry).then((buf) => {
+          if (done) return;
+          texts[entry.fileName] = buf.toString('utf8');
+          zip.readEntry();
+        }, finish);
+      });
+      zip.readEntry();
+    });
+  } finally {
+    done = true;
+    try { zip.close(); } catch (_) { /* ignore */ }
+  }
+  return texts;
+}
+
+// Passata 2: estrae in streaming solo le foto volute (una alla volta, con
+// backpressure). Un errore di scrittura è FATALE (niente wipe fatto ancora, quindi
+// l'utente resta con i suoi dati e riprova) invece di finire in un backup silenziosamente
+// incompleto come succedeva prima.
+async function extractRestorePhotos(filePath, wanted, outDir) {
+  const zip = await openRestoreZip(filePath);
+  let written = 0, skipped = 0;
+  let done = false;
+  try {
+    await new Promise((resolve, reject) => {
+      const finish = (e) => { if (done) return; done = true; if (e) reject(e); else resolve(); };
+      zip.on('error', finish);
+      zip.on('end', () => finish());
+      zip.on('entry', (entry) => {
+        if (done) return;
+        const name = entry.fileName;
+        if (!name.startsWith('photos/') || name.endsWith('/')) { zip.readEntry(); return; }
+        const base = name.slice(name.lastIndexOf('/') + 1);
+        // Niente path traversal: solo basenames semplici dentro PHOTO_DIR.
+        if (!base || base === '.' || base === '..' || base.includes('\\') || name.includes('..')) {
+          skipped++; zip.readEntry(); return;
+        }
+        if (!wanted.has(base)) { skipped++; zip.readEntry(); return; } // foto orfana
+        zip.openReadStream(entry, (err, stream) => {
+          if (done) return;
+          if (err) return finish(err);
+          const out = fs.createWriteStream(path.join(outDir, base));
+          stream.on('error', (e) => { fileCleanup(out, stream); finish(e); });
+          out.on('error', (e) => { fileCleanup(out, stream); finish(e); });
+          out.on('finish', () => { written++; zip.readEntry(); });
+          stream.pipe(out);
+        });
+      });
+      zip.readEntry();
+    });
+  } finally {
+    done = true;
+    try { zip.close(); } catch (_) { /* ignore */ }
+  }
+  return { written, skipped };
+}
+
+function fileCleanup(out, stream) {
+  try { out.destroy(); } catch (_) { /* ignore */ }
+  try { stream.destroy(); } catch (_) { /* ignore */ }
+}
+
+// Tutti i photo_path dichiarati nei CSV: serve PRIMA della transazione per decidere
+// quali foto estrarre (vedi ordine sopra).
+function collectPhotoPaths(texts) {
+  const set = new Set();
+  const add = (text, colName) => {
+    if (!text) return;
+    const rows = parseCsv(text).filter(r => r.some(c => (c || '').trim() !== ''));
+    if (rows.length < 2) return;
+    const header = (rows[0] || []).map(h => (h || '').toLowerCase().trim());
+    const col = header.indexOf(colName);
+    if (col < 0) return;
+    for (let i = 1; i < rows.length; i++) {
+      const v = (rows[i] && rows[i][col]) ? String(rows[i][col]).trim() : '';
+      if (v) set.add(v);
+    }
+  };
+  add(texts['wines.csv'], 'photo');
+  add(texts['spirits.csv'], 'photo');
+  add(texts['wine_photos.csv'], 'photo_path');
+  add(texts['spirit_photos.csv'], 'photo_path');
+  return set;
+}
+
+app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
+  const tempZip = req.file ? req.file.path : null;
+  const cleanupTemp = () => { if (tempZip) { try { fs.unlinkSync(tempZip); } catch (_) { /* ignore */ } } };
+  if (!req.file) return res.status(400).json({ error: 'file ZIP mancante' });
+
+  let texts;
+  try {
+    texts = await readRestoreTexts(req.file.path);
   } catch (e) {
-    try { fs.unlinkSync(req.file.path); } catch (_) {}
+    cleanupTemp();
     return res.status(400).json({ error: 'file ZIP non valido: ' + (e.message || e) });
   }
-  try { fs.unlinkSync(req.file.path); } catch (_) { /* best-effort cleanup */ }
 
   // Validazione: MANIFEST.json deve esistere e avere schema_version=1, 2 oppure 3.
   //   1 = solo vini (legacy)
   //   2 = vini + alcolici (senza galleries separate)
   //   3 = corrente, include anche le galleries (wine_photos / spirit_photos)
-  const manifestEntry = zip.getEntry('MANIFEST.json');
-  if (!manifestEntry) return res.status(400).json({ error: 'MANIFEST.json mancante (non è un backup valido)' });
+  const manifestText = texts['MANIFEST.json'];
+  if (manifestText == null) {
+    cleanupTemp();
+    return res.status(400).json({ error: 'MANIFEST.json mancante (non è un backup valido)' });
+  }
   let manifest;
   try {
-    manifest = JSON.parse(manifestEntry.getData().toString('utf8'));
+    manifest = JSON.parse(manifestText);
   } catch (e) {
+    cleanupTemp();
     return res.status(400).json({ error: 'MANIFEST.json non parsabile' });
   }
   const schemaVer = Number(manifest.schema_version);
   if (schemaVer !== 1 && schemaVer !== 2 && schemaVer !== 3) {
+    cleanupTemp();
     return res.status(400).json({ error: 'schema_version non supportato: ' + manifest.schema_version });
   }
-  const includeSpirits = (schemaVer >= 2) && (zip.getEntry('spirits.csv') != null);
+  const includeSpirits = (schemaVer >= 2) && (texts['spirits.csv'] != null);
 
-  const csvEntry = zip.getEntry('wines.csv');
-  if (!csvEntry) return res.status(400).json({ error: 'wines.csv mancante nel backup' });
-  const csvText = csvEntry.getData().toString('utf8');
-  const rows = parseCsv(csvText).filter(r => r.some(c => (c || '').trim() !== ''));
-  if (!rows.length) return res.status(400).json({ error: 'wines.csv vuoto' });
+  if (texts['wines.csv'] == null) {
+    cleanupTemp();
+    return res.status(400).json({ error: 'wines.csv mancante nel backup' });
+  }
+  const rows = parseCsv(texts['wines.csv']).filter(r => r.some(c => (c || '').trim() !== ''));
+  if (!rows.length) {
+    cleanupTemp();
+    return res.status(400).json({ error: 'wines.csv vuoto' });
+  }
 
   const header = (rows[0] || []).map(h => (h || '').toLowerCase().trim());
   const idx = {
@@ -1737,13 +1909,30 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
     created_at: header.indexOf('created_at'),
   };
   if (idx.name < 0 || idx.rating < 0 || idx.id < 0) {
+    cleanupTemp();
     return res.status(400).json({ error: 'colonne "id", "name" o "rating" mancanti nell\'header' });
   }
 
-  // WIPE + RESTORE in transazione SQLite (BEGIN/COMMIT/ROLLBACK).
-  // Se qualcosa fallisce a metà, ROLLBACK ripristina uno stato coerente (vuoto).
+  // --- FASE A: le foto del backup → disco, PRIMA di toccare il DB ---
+  // Nessuna cancellazione: se qualcosa qui fallisce il filesystem è ancora quello
+  // vecchio, quindi l'utente non perde niente (vedi ordine in testa alla route).
+  await ensurePhotoDir();
+  const wantedPhotos = collectPhotoPaths(texts);
+  let photoWritten = 0, photoSkipped = 0;
   try {
-    await ensurePhotoDir();
+    ({ written: photoWritten, skipped: photoSkipped } =
+      await extractRestorePhotos(req.file.path, wantedPhotos, PHOTO_DIR));
+  } catch (e) {
+    cleanupTemp();
+    console.error('[restore] fase foto:', e);
+    return res.status(500).json({ error: 'ripristino foto fallito (dati attuali intatti): ' + (e.message || e) });
+  }
+
+  // --- FASE B: WIPE + RESTORE in transazione SQLite (BEGIN/COMMIT/ROLLBACK). ---
+  // Se qualcosa fallisce a metà, ROLLBACK riporta il DB al suo stato precedente.
+  // NB: da qui a COMMIT non c'è nessun `await`: tutto è sincrono, così nessuna
+  // richiesta concorrente può finire dentro la nostra transazione.
+  try {
     db.run('BEGIN');
 
     // 1. Svuota DB. Ordine importante a causa dei vincoli FK:
@@ -1757,12 +1946,9 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
     db.run('DELETE FROM spirits');
     db.run('DELETE FROM stores');
 
-    // 2. Svuota /photos (best-effort: ignora singoli file mancanti o locked).
-    if (fs.existsSync(PHOTO_DIR)) {
-      for (const f of fs.readdirSync(PHOTO_DIR)) {
-        try { fs.unlinkSync(path.join(PHOTO_DIR, f)); } catch (_) { /* ignore */ }
-      }
-    }
+    // 2. (photo wipe) Le foto NON vengono più cancellate qui: succede nella FASE C,
+    //    dopo il COMMIT. Prima venivano svuotate subito e un crash a metà restore
+    //    le faceva sparire per sempre (il DB tornava indietro, i file no).
 
     // 3. Ricostruisci stores case-insensitive, riusando la mappa all'interno della transazione.
     // Nota: NON ci fidiamo di last_insert_rowid() dopo INSERT in transazioni BEGIN/COMMIT di sql.js
@@ -1846,10 +2032,8 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
     //     aggiuntiva. spirit_type è una stringa libera qui, quindi niente whitelist:
     //     ogni valore non vuoto viene accettato (lowercase + trim + cap 40 char).
     let spiritsRestored = 0, spiritsErrors = 0;
-    if (includeSpirits) {
-      const spiritCsvEntry = zip.getEntry('spirits.csv');
-      const spiritCsvText = spiritCsvEntry.getData().toString('utf8');
-      const sRows = parseCsv(spiritCsvText).filter(r => r.some(c => (c || '').trim() !== ''));
+    if (includeSpirits && texts['spirits.csv'] != null) {
+      const sRows = parseCsv(texts['spirits.csv']).filter(r => r.some(c => (c || '').trim() !== ''));
       if (sRows.length > 1) {
         const sHeader = (sRows[0] || []).map(h => (h || '').toLowerCase().trim());
         const sIdx = {
@@ -1912,18 +2096,17 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
       }
     }
 
-    // 4. Scrivi le foto: solo quelle effettivamente referenziate dal CSV (evita di
-    //    spargere file orfani che farebbero solo peso). Estrai ogni entries/photos/<file>.
-    let photoWritten = 0, photoSkipped = 0;
+    // 4. (foto già scritte) L'estrazione delle foto è avvenuta nella FASE A, prima
+    //    della transazione: qui sotto serve solo photoSet (righe effettivamente
+    //    importate) per la FASE C che pulisce i file non più referenziati.
 
     // 3c. (solo backup v3) Importa anche le galleries multi-foto. wine_photos.csv e
     //     spirit_photos.csv hanno lo stesso schema: id;parent_id;position;photo_path;created_at
     //     Ogni photo_path viene aggiunto al set per essere poi scritto su disco insieme
     //     alle foto "primary" (quelle referenziate anche dai wines.csv / spirits.csv).
     let winePhotosRestored = 0, winePhotoErrors = 0;
-    if (schemaVer === 3 && zip.getEntry('wine_photos.csv')) {
-      const wpcText = zip.getEntry('wine_photos.csv').getData().toString('utf8');
-      const wpRows = parseCsv(wpcText).filter(r => r.some(c => (c || '').trim() !== ''));
+    if (schemaVer === 3 && texts['wine_photos.csv'] != null) {
+      const wpRows = parseCsv(texts['wine_photos.csv']).filter(r => r.some(c => (c || '').trim() !== ''));
       if (wpRows.length > 1) {
         const wpHeader = (wpRows[0] || []).map(h => (h || '').toLowerCase().trim());
         const wpIdx = {
@@ -1958,9 +2141,8 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
       }
     }
     let spiritPhotosRestored = 0, spiritPhotoErrors = 0;
-    if (schemaVer === 3 && zip.getEntry('spirit_photos.csv')) {
-      const spcText = zip.getEntry('spirit_photos.csv').getData().toString('utf8');
-      const spRows = parseCsv(spcText).filter(r => r.some(c => (c || '').trim() !== ''));
+    if (schemaVer === 3 && texts['spirit_photos.csv'] != null) {
+      const spRows = parseCsv(texts['spirit_photos.csv']).filter(r => r.some(c => (c || '').trim() !== ''));
       if (spRows.length > 1) {
         const spHeader = (spRows[0] || []).map(h => (h || '').toLowerCase().trim());
         const spIdx = {
@@ -2008,28 +2190,22 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
         photo_path
       )
     `);
-    const photoEntries = zip.getEntries().filter(e =>
-      e.entryName.startsWith('photos/') &&
-      !e.isDirectory &&
-      !e.entryName.includes('..')  // difesa contro path traversal improbabile in un backup locale
-    );
-    for (const e of photoEntries) {
-      const basename = path.basename(e.entryName);
-      // Mantien solo file "semplici" (no sottocartelle annidate).
-      if (!basename || basename.indexOf('/') !== -1 || basename.indexOf('\\') !== -1) { photoSkipped++; continue; }
-      if (!photoSet.has(basename)) { photoSkipped++; continue; } // foto orfana
-      try {
-        const out = path.join(PHOTO_DIR, basename);
-        fs.writeFileSync(out, e.getData());
-        photoWritten++;
-      } catch (err) {
-        photoSkipped++;
-      }
-    }
-
     db.run('COMMIT');
     saveDB(true);
 
+    // --- FASE C: cancella da PHOTO_DIR i file non più referenziati ---
+    // Solo ORA che il commit è avvenuto. Se il processo muore prima, le foto vecchie
+    // sono ancora tutte sul disco e il DB è coerente con lo stato precedente.
+    let leftovers = 0;
+    if (fs.existsSync(PHOTO_DIR)) {
+      for (const f of fs.readdirSync(PHOTO_DIR)) {
+        if (photoSet.has(f)) continue;
+        try { fs.unlinkSync(path.join(PHOTO_DIR, f)); leftovers++; } catch (_) { /* ignore */ }
+      }
+    }
+    if (leftovers) console.log(`[restore] rimossi ${leftovers} file non più referenziati`);
+
+    cleanupTemp();
     res.json({
       ok: true,
       schema_version: schemaVer,
@@ -2039,6 +2215,7 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
       spirit_photos: spiritPhotosRestored,
       wine_errors: errors,
       spirit_errors: spiritsErrors,
+      errors: errors + spiritsErrors, // alias letto da app.js per il toast
       wine_photo_errors: winePhotoErrors,
       spirit_photo_errors: spiritPhotoErrors,
       photos_written: photoWritten,
@@ -2046,6 +2223,7 @@ app.post('/api/restore', restoreUpload.single('backup'), async (req, res) => {
     });
   } catch (e) {
     try { db.run('ROLLBACK'); } catch (_) { /* ignore */ }
+    cleanupTemp();
     console.error('[restore]', e);
     res.status(500).json({ error: 'restore fallito a metà: ' + (e.message || e) });
   }
@@ -2064,8 +2242,11 @@ app.get(/^(?!\/api\/|\/photos\/).*/, (req, res) => {
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   if (err && err.name === 'MulterError') {
+    // multer non riporta il limite violato: lo deduciamo dalla rotta, così il
+    // messaggio è giusto sia per le foto che per il restore.
+    const isRestore = typeof req.originalUrl === 'string' && req.originalUrl.startsWith('/api/restore');
     const msg = err.code === 'LIMIT_FILE_SIZE'
-      ? 'file troppo grande (max 8 MB)'
+      ? `file troppo grande (max ${isRestore ? RESTORE_MAX_UPLOAD_MB : PHOTO_MAX_UPLOAD_MB} MB)`
       : (err.message || 'errore upload');
     return res.status(413).json({ error: msg });
   }
@@ -2119,6 +2300,7 @@ process.on('unhandledRejection', (e) => {
 (async () => {
   await initDb();
   await ensurePhotoDir();
+  purgeUploadTmp();
   app.listen(PORT, () => {
     console.log(`[vini] Server in ascolto su http://0.0.0.0:${PORT}`);
   });
